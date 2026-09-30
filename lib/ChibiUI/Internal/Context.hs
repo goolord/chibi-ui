@@ -32,7 +32,7 @@ import ChibiUI.Internal.Layout (LayoutState, freshLayout)
 import ChibiUI.Internal.RectTable (RectTable, newRectTable, rectTableToList)
 import ChibiUI.Internal.Store (WidgetStore, emptyWidgetStore)
 import ChibiUI.Internal.Style (Theme, defaultTheme)
-import ChibiUI.Internal.Types (Rect, V2)
+import ChibiUI.Internal.Types (Rect, V2, validScale)
 
 -- | One lightweight overlay. Actions run before the next view invocation.
 data Popup = Popup
@@ -69,9 +69,8 @@ data Context model = Context
   , ctxInput :: !(IORef Input)
   , ctxStore :: !(IORef WidgetStore)
   , ctxRects :: !(IORef RectTable)
-  -- ^ This frame's widget rects, keyed by hashed id. The frame start moves
-  -- it to 'ctxPrevRects' for hit tests and Tab; the tables trade places.
-  , ctxPrevRects :: !(IORef RectTable)
+  -- ^ This frame's widget rects, keyed by hashed id, for hit tests. The
+  -- frame start clears it.
   , ctxFocus :: !(IORef WidgetId)
   , ctxFocusRequested :: !(IORef Bool)
   -- ^ Whether a widget claimed focus this frame; a click that claims none
@@ -132,7 +131,6 @@ newContext initial = do
   input <- newIORef emptyInput
   store <- newIORef emptyWidgetStore
   rects <- newRectTable >>= newIORef
-  prevRects <- newRectTable >>= newIORef
   focus <- newIORef noWidget
   focusReq <- newIORef False
   focusables <- newIORef []
@@ -160,7 +158,6 @@ newContext initial = do
       , ctxInput = input
       , ctxStore = store
       , ctxRects = rects
-      , ctxPrevRects = prevRects
       , ctxFocus = focus
       , ctxFocusRequested = focusReq
       , ctxFocusables = focusables
@@ -187,7 +184,7 @@ setTheme ctx = writeIORef (ctxTheme ctx)
 -- on the next sync.
 setScale :: Context model -> Float -> IO ()
 setScale ctx scale = do
-  let valid = if scale > 0 && not (isNaN scale || isInfinite scale) then scale else 1
+  let valid = if validScale scale then scale else 1
   writeIORef (ctxScale ctx) valid
   font <- readIORef (ctxFont ctx)
   fontSetScale font valid

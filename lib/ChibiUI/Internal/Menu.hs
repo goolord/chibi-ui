@@ -21,8 +21,7 @@ import ChibiUI.Internal.Types
 contextMenu :: [(Text, ChibiUI model ())] -> ChibiUI model ()
 contextMenu items = do
   wid <- nextId
-  ctx <- askContext
-  r <- liftIO (lsLast <$> readIORef (ctxLayout ctx))
+  r <- lsLast <$> readLayout
   recordRect wid r
   openContextMenu wid r [(t, True, action) | (t, action) <- items]
 

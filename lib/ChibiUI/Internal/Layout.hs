@@ -18,7 +18,7 @@ module ChibiUI.Internal.Layout
   ) where
 
 import Data.Maybe (fromMaybe)
-import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..))
+import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectUnion)
 
 -- | Where the cursor is and what the next widget inherits.
 data LayoutState = LayoutState
@@ -103,7 +103,7 @@ placeLayout gap sz ls = (r, ls
   , lsNextW = Nothing
   , lsNextH = Nothing
   , lsBounded = True
-  , lsBounds = if lsBounded ls then unionBounds r (lsBounds ls) else r
+  , lsBounds = if lsBounded ls then rectUnion r (lsBounds ls) else r
   })
   where
     w = max 0 (fromMaybe (sizeW sz) (lsNextW ls))
@@ -111,11 +111,6 @@ placeLayout gap sz ls = (r, ls
     r = Rect (lsPenX ls) (lsLineY ls) w h
     lineH = if lsRowOpen ls then max (lsLineH ls) h else h
     continuesRow = lsRowOpen ls && lsFlowRow ls
-    unionBounds a b =
-      let x = min (rectX b) (rectX a)
-          y = min (rectY b) (rectY a)
-       in Rect x y (max (rectX b + rectW b) (rectX a + rectW a) - x)
-                   (max (rectY b + rectH b) (rectY a + rectH a) - y)
 
 remainingWidth :: LayoutState -> Float
 remainingWidth ls = max 0 (lsIndent ls + lsAvailW ls - lsPenX ls)

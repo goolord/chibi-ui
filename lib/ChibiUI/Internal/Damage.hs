@@ -30,6 +30,7 @@ import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), vertexSize)
 import ChibiUI.Internal.Types
   ( Rect (..)
   , Size (..)
+  , foldUpTo
   , rectArea
   , rectIntersect
   , rectNonEmpty
@@ -58,17 +59,20 @@ data FrameSnapshot = FrameSnapshot
   { snapVertices :: !BS.ByteString
   -- ^ The used prefix of the vertex buffer: quad @k@ lives at byte
     -- @k * 4 * vertexSize@.
-  , snapQuadCount :: !Int
-  , snapBatches :: ![(Rect, Int)]
-  -- ^ Each command's clip and texture, in order, without the index ranges.
-    -- Ranges shift when quads are inserted or removed, which the quad diff
-    -- already sees; a clip or texture changing in place can repaint
+  , snapBatches :: ![DrawCmd]
+  -- ^ The frame's commands. Only their clips and textures are compared:
+    -- index ranges shift when quads are inserted or removed, which the quad
+    -- diff already sees; a clip or texture changing in place can repaint
     -- different pixels over identical geometry and forces a full frame.
   }
 
 -- | Bytes per quad: four vertices.
 quadBytes :: Int
 quadBytes = 4 * vertexSize
+
+-- | Quads a snapshot holds.
+snapQuadCount :: FrameSnapshot -> Int
+snapQuadCount snap = BS.length (snapVertices snap) `div` quadBytes
 
 -- | Quads whose diff alone is worth reporting before falling back to a
 -- full frame.
@@ -90,51 +94,47 @@ takeSnapshot dd = do
   pure
     FrameSnapshot
       { snapVertices = verts
-      , snapQuadCount = drawIndexCount dd `div` 6
-      , snapBatches = [(cmdRect c, cmdTextureId c) | c <- drawCommands dd]
+      , snapBatches = drawCommands dd
       }
 
 -- | Diff a snapshot against the frame just drawn. Texture contents are
 -- assumed unchanged; the backend forces a full frame when the atlas or an
--- image uploads. Equal geometry is detected by comparing the arena in
--- place, so an unchanged frame copies nothing.
+-- image uploads. The frame is compared against the arena in place, so the
+-- diff itself copies nothing.
 frameDamage :: FrameSnapshot -> DrawData -> Size -> IO Damage
 frameDamage snap dd window = do
-  let newQuads = drawIndexCount dd `div` 6
   same <- vertexBytesEq (snapVertices snap) dd
-  if newQuads == snapQuadCount snap && same
-    && batchesEq (snapBatches snap) (drawCommands dd)
+  if same && batchesEq (snapBatches snap) (drawCommands dd)
     then pure DamageNone
     else
       if batchesInPlace (snapBatches snap) (drawCommands dd)
         then pure DamageFull
-        else do
+        else withForeignPtr (drawVertices dd) $ \vp -> do
           let oldN = snapQuadCount snap
-              n = min oldN newQuads
-          newVerts <- copyVertices dd
-          rects <- changedQuadRects (snapVertices snap) newVerts n oldN newQuads
+              newN = drawVertexCount dd `div` 4
+          rects <- changedQuadRects (snapVertices snap) vp (min oldN newN) oldN newN
           pure (maybe DamageFull (mergeDamage window) rects)
 
 -- | Whether the frame's batches equal the snapshot's, element for element,
 -- compared field-wise without materializing anything.
-batchesEq :: [(Rect, Int)] -> [DrawCmd] -> Bool
+batchesEq :: [DrawCmd] -> [DrawCmd] -> Bool
 batchesEq (s : ss) (c : cs) = batchEq s c && batchesEq ss cs
 batchesEq [] [] = True
 batchesEq _ _ = False
 
--- | Whether one batch pair differs in clip or texture.
-batchEq :: (Rect, Int) -> DrawCmd -> Bool
-batchEq (Rect x y w h, t) c =
-  cmdClipX c == x
-    && cmdClipY c == y
-    && cmdClipW c == w
-    && cmdClipH c == h
-    && cmdTextureId c == t
+-- | Whether two batches share clip and texture.
+batchEq :: DrawCmd -> DrawCmd -> Bool
+batchEq a b =
+  cmdClipX a == cmdClipX b
+    && cmdClipY a == cmdClipY b
+    && cmdClipW a == cmdClipW b
+    && cmdClipH a == cmdClipH b
+    && cmdTextureId a == cmdTextureId b
 
 -- | Whether the two batch lists have equal lengths with a batch that
 -- changed in place: same structure, different clip or texture somewhere,
 -- which can repaint different pixels over identical geometry.
-batchesInPlace :: [(Rect, Int)] -> [DrawCmd] -> Bool
+batchesInPlace :: [DrawCmd] -> [DrawCmd] -> Bool
 batchesInPlace = walk False
   where
     walk !diff (s : ss) (c : cs) = walk (diff || not (batchEq s c)) ss cs
@@ -171,46 +171,39 @@ trackFrame ref window dd = do
     _ -> takeSnapshot dd >>= writeIORef ref . Just
   pure damage
 
--- | Bounds of every quad that differs between two vertex buffers over
--- @[0, n)@, plus the tail quads present in only one of them, from both
--- sides. 'Nothing' when there is too much to track.
-changedQuadRects :: BS.ByteString -> BS.ByteString -> Int -> Int -> Int -> IO (Maybe [Rect])
-changedQuadRects old new n oldN newN = case diffQuads old new n of
-  Nothing -> pure Nothing
-  Just changed -> do
-    let touched = changed ++ [n .. oldN - 1] ++ [n .. newN - 1]
-    if length touched > maxChangedQuads
-      then pure Nothing
-      else do
-        -- Both sides of every changed quad: the old area may need clearing
-        -- even where the new frame draws nothing.
-        oldSide <- mapM (quadBounds old) [k | k <- touched, k < oldN]
-        newSide <- mapM (quadBounds new) [k | k <- touched, k < newN]
-        pure (Just (filter rectNonEmpty (oldSide ++ newSide)))
+-- | Bounds of every quad that differs between the snapshot's vertices and
+-- the frame's at @new@ over @[0, n)@, plus the tail quads present in only
+-- one of them, from both sides. 'Nothing' when there is too much to track.
+changedQuadRects :: BS.ByteString -> Ptr Word8 -> Int -> Int -> Int -> IO (Maybe [Rect])
+changedQuadRects old new n oldN newN =
+  BSU.unsafeUseAsCString old $ \op -> do
+    let oldP = castPtr op
+    diff <- diffQuads oldP new n
+    case diff of
+      Nothing -> pure Nothing
+      Just changed -> do
+        let touched = changed ++ [n .. oldN - 1] ++ [n .. newN - 1]
+        if length touched > maxChangedQuads
+          then pure Nothing
+          else do
+            -- Both sides of every changed quad: the old area may need
+            -- clearing even where the new frame draws nothing.
+            oldSide <- mapM (quadAtPtr oldP) [k | k <- touched, k < oldN]
+            newSide <- mapM (quadAtPtr new) [k | k <- touched, k < newN]
+            pure (Just (filter rectNonEmpty (oldSide ++ newSide)))
 
 -- | Indices of the quads over @[0, n)@ whose bytes differ, or 'Nothing'
 -- past the tracking budget.
-diffQuads :: BS.ByteString -> BS.ByteString -> Int -> Maybe [Int]
-diffQuads old new n = go 0 []
+diffQuads :: Ptr Word8 -> Ptr Word8 -> Int -> IO (Maybe [Int])
+diffQuads old new n = go 0 (0 :: Int) []
   where
-    go !k acc
-      | length acc > maxChangedQuads = Nothing
-      | k >= n = Just (reverse acc)
-      | quadEq old new k = go (k + 1) acc
-      | otherwise = go (k + 1) (k : acc)
-
--- | Whether quad @k@ is byte-identical in both buffers.
-quadEq :: BS.ByteString -> BS.ByteString -> Int -> Bool
-quadEq a b !k = eq (k * quadBytes) 0
-  where
-    eq !base !i
-      | i >= quadBytes = True
-      | BSU.unsafeIndex a (base + i) /= BSU.unsafeIndex b (base + i) = False
-      | otherwise = eq base (i + 1)
-
--- | A quad's axis-aligned bounds from vertex 0's and vertex 2's corners.
-quadBounds :: BS.ByteString -> Int -> IO Rect
-quadBounds bs !k = BSU.unsafeUseAsCString bs $ \p -> quadAtPtr (castPtr p) k
+    go !k !count acc
+      | count > maxChangedQuads = pure Nothing
+      | k >= n = pure (Just (reverse acc))
+      | otherwise = do
+          let off = k * quadBytes
+          d <- c_memcmp (old `plusPtr` off) (new `plusPtr` off) (fromIntegral quadBytes)
+          if d == 0 then go (k + 1) count acc else go (k + 1) (count + 1) (k : acc)
 
 -- | Union the bounds of the quads a command's index range covers, for
 -- testing a command against a damage rectangle without drawing it.
@@ -219,8 +212,11 @@ commandQuadBounds dd cmd =
   withForeignPtr (drawVertices dd) $ \vp -> do
     let first = fromIntegral (cmdIndexOffset cmd) `div` 6
         end = (fromIntegral (cmdIndexOffset cmd) + fromIntegral (cmdIndexCount cmd)) `div` 6
-    qs <- mapM (quadAtPtr vp) [first .. end - 1]
-    pure (foldr rectUnion (Rect 0 0 0 0) qs)
+    if end <= first
+      then pure (Rect 0 0 0 0)
+      else do
+        seed <- quadAtPtr vp first
+        foldUpTo (end - first - 1) (\acc i -> rectUnion acc <$> quadAtPtr vp (first + 1 + i)) seed
 
 -- | The bounds of quad @k@: the min and max of vertex 0's and vertex 2's
 -- corners in the first 8 bytes of each vertex.
@@ -264,7 +260,3 @@ takeIntersecting r = go []
     go skipped (x : rest) = case rectIntersect r x of
       Just _ -> Just (x, reverse skipped ++ rest)
       Nothing -> go (x : skipped) rest
-
--- | A command's clip as a rect.
-cmdRect :: DrawCmd -> Rect
-cmdRect c = Rect (cmdClipX c) (cmdClipY c) (cmdClipW c) (cmdClipH c)

@@ -20,6 +20,7 @@ module ChibiUI.Internal.Types
   , clamp
   , clamp01
   , roundHalfUp
+  , validScale
   , lerpColor
   , ImageId (..)
   , rectContains
@@ -27,6 +28,7 @@ module ChibiUI.Internal.Types
   , rectHit
   , rectUnion
   , rectIntersect
+  , rectsOverlap
   , rectInflate
   , rectArea
   , v2Add
@@ -148,6 +150,10 @@ roundHalfUp r =
   let f = floor r
    in if r - fromIntegral f >= 0.5 then f + 1 else f
 
+-- | Whether a UI scale is usable: finite and positive.
+validScale :: Float -> Bool
+validScale s = s > 0 && not (isNaN s || isInfinite s)
+
 -- | Interpolate all four packed channels. The factor is clamped to 0-1;
 -- interpolation is in sRGB channel space, not linear light.
 lerpColor :: Color -> Color -> Float -> Color
@@ -202,6 +208,13 @@ rectIntersect (Rect x1 y1 w1 h1) (Rect x2 y2 w2 h2) =
       w = xEnd - x
       h = yEnd - y
    in if w > 0 && h > 0 then Just (Rect x y w h) else Nothing
+
+-- | Whether two rectangles share positive area.
+{-# INLINE rectsOverlap #-}
+rectsOverlap :: Rect -> Rect -> Bool
+rectsOverlap a b = case rectIntersect a b of
+  Just _ -> True
+  Nothing -> False
 
 -- | Extend every edge by the margin. A negative margin shrinks the rectangle.
 {-# INLINE rectInflate #-}

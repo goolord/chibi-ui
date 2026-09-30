@@ -6,6 +6,7 @@ module ChibiUI.Internal.Style
   , lightTheme
   , widgetPad
   , fieldPad
+  , fieldHeight
   , TextAlign (..)
   , alignedTextY
   ) where
@@ -92,3 +93,8 @@ widgetPad = 6
 -- | Space between a field's box and its text.
 fieldPad :: Float
 fieldPad = 4
+
+-- | The height of a one-line field: a line of text, its padding and 1px
+-- borders. Captions aligned with 'alignTextToFrame' take it too.
+fieldHeight :: Float
+fieldHeight = lineHeight + fieldPad * 2 + 2

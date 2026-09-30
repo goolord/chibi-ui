@@ -3,14 +3,13 @@
 module ChibiUI.Internal.Editor
   ( Editor (..), EditState (..), Command (..), Motion (..)
   , newEditor, selection, selectedText, select, selectWord, replace, command, inputCommands
-  , textLines, caretLine, sanitizeText
+  , textLines, caretRowLine, sanitizeText
   ) where
 
 import Data.Char (isAlphaNum, isPrint, isSpace)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
-import System.Info (os)
 import ChibiUI.Internal.Input
 
 data EditState = EditState {editText :: !Text, editCaret :: !Int, editAnchor :: !Int}
@@ -109,14 +108,25 @@ textLines :: Text -> [(Int, Text)]
 textLines t = zip (scanl (\n line -> n + T.length line + 1) 0 ls) ls
   where ls = T.splitOn "\n" t
 
-caretLine :: Text -> Int -> (Int, Text)
-caretLine t c = last (takeWhile ((<= max 0 c) . fst) (textLines t))
+-- | The caret's row among 'textLines' and that line, as
+-- @(row, (start, line))@.
+caretRowLine :: [(Int, Text)] -> Int -> (Int, (Int, Text))
+caretRowLine ls c =
+  let before = takeWhile ((<= max 0 c) . fst) ls
+   in (length before - 1, last before)
 
 -- | Fields discard controls; text areas retain LF and expand pasted tabs.
+-- Clean text, the usual case, comes back as is after one scan.
 sanitizeText :: Bool -> Text -> Text
-sanitizeText False = T.filter isPrint
-sanitizeText True = T.filter (\c -> isPrint c || c == '\n')
-  . T.replace "\t" "    " . T.replace "\r" "\n" . T.replace "\r\n" "\n"
+sanitizeText False t
+  | T.all isPrint t = t
+  | otherwise = T.filter isPrint t
+sanitizeText True t
+  | T.all kept t = t
+  | otherwise =
+      T.filter kept . T.replace "\t" "    " . T.replace "\r" "\n" . T.replace "\r\n" "\n" $ t
+  where
+    kept c = isPrint c || c == '\n'
 
 target :: Motion -> EditState -> Int
 target motion (EditState t c _) = case motion of
@@ -131,11 +141,10 @@ target motion (EditState t c _) = case motion of
   PreviousLine -> vertical (-1)
   NextLine -> vertical 1
   where
-    (start, line) = caretLine t c
+    ls = textLines t
+    (row, (start, line)) = caretRowLine ls c
     vertical delta =
-      let ls = textLines t
-          row = T.count "\n" (T.take c t)
-          (offset, destination) = ls !! max 0 (min (length ls - 1) (row + delta))
+      let (offset, destination) = ls !! max 0 (min (length ls - 1) (row + delta))
        in offset + min (c - start) (T.length destination)
     wordLength xs =
       let (spaces, rest) = span isSpace xs
@@ -174,8 +183,9 @@ inputCommands multiline inp = concatMap binding (inputKeys inp) ++ typing
     mods = inputModifiers inp
     primary = modPrimary mods && not (modAlt mods)
     shift = modShift mods
-    jump = if os == "darwin" then modAlt mods else modCtrl mods
-    macCommand = os == "darwin" && modSuper mods
+    jump = if onMac then modAlt mods else modCtrl mods
+    macCommand = onMac && modSuper mods
+
     lineStart = if multiline then LineStart else Start
     lineEnd = if multiline then LineEnd else End
     left = if macCommand then lineStart else if jump then WordBackward else Backward

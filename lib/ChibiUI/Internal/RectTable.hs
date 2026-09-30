@@ -3,8 +3,8 @@
 {-# LANGUAGE UnboxedTuples #-}
 
 -- | A mutable open-addressing table from widget slot to rect: what the
--- context records each frame's widget geometry in, and what it keeps of
--- the previous frame's for hit tests. Rebuilding an 'IntMap' every frame
+-- context records each frame's widget geometry in, for hit tests.
+-- Rebuilding an 'IntMap' every frame
 -- pays a fresh path of nodes per widget and turns the whole last map into
 -- garbage; this table writes each rect in place and clears by zeroing
 -- keys, so steady frames allocate nothing. Keys are widget slots, which
@@ -24,17 +24,15 @@ import Data.Bits ((.&.))
 import Data.IORef
 import GHC.Exts
   ( Float (..)
-  , Float#
   , Int (..)
-  , Int#
   , MutableByteArray#
   , RealWorld
-  , State#
   , andI#
   , isTrue#
   , newByteArray#
   , readFloatArray#
   , readIntArray#
+  , setByteArray#
   , writeFloatArray#
   , writeIntArray#
   , (==#)
@@ -44,33 +42,11 @@ import GHC.Exts
   )
 import GHC.IO (IO (IO))
 import ChibiUI.Internal.Types (Rect (..))
+import ChibiUI.Internal.URef
 
 -- | A lifted box for one mutable byte array, so growth can swap it inside
 -- an 'IORef'.
 data MBox = MBox !(MutableByteArray# RealWorld)
-
--- | One unboxed mutable 'Int' cell, as in "ChibiUI.Internal.Draw": the
--- entry counter must update without boxing.
-data URef = URef !(MutableByteArray# RealWorld)
-
-{-# INLINE newURef #-}
-newURef :: Int -> IO URef
-newURef (I# n#) =
-  IO $ \s -> case newByteArray# 8# s of
-    (# s', cell #) -> case writeIntArray# cell 0# n# s' of
-      s'' -> (# s'', URef cell #)
-
-{-# INLINE readURef #-}
-readURef :: URef -> IO Int
-readURef (URef cell) =
-  IO $ \s -> case readIntArray# cell 0# s of
-    (# s', n# #) -> (# s', I# n# #)
-
-{-# INLINE writeURef #-}
-writeURef :: URef -> Int -> IO ()
-writeURef (URef cell) (I# n#) =
-  IO $ \s -> case writeIntArray# cell 0# n# s of
-    s' -> (# s', () #)
 
 -- | The table: one 'Int' array of keys, one 'Float' array of four
 -- coordinates per slot, a power-of-two capacity, and the live count.
@@ -111,12 +87,8 @@ allocRects (I# n#) =
 -- | Zero every key, which empties the table. Coordinates go stale, but no
 -- zero-keyed slot is ever read.
 zeroKeys :: MBox -> Int -> IO ()
-zeroKeys (MBox ba) (I# n#) = IO (go 0#)
-  where
-    go !i# s
-      | isTrue# (i# ==# n#) = (# s, () #)
-      | otherwise = case writeIntArray# ba i# 0# s of
-          s' -> go (i# +# 1#) s'
+zeroKeys (MBox ba) (I# n#) =
+  IO $ \s -> case setByteArray# ba 0# (n# *# 8#) 0# s of s' -> (# s', () #)
 
 -- | Empty the table for reuse by the next frame.
 clearRectTable :: RectTable -> IO ()
@@ -172,56 +144,48 @@ insertRect rt k (Rect (F# x) (F# y) (F# w) (F# h)) = do
   fresh <- IO (go start#)
   when fresh (writeURef (rtCount rt) (count + 1))
 
+-- | The index of a slot's entry, or -1 when the slot was not recorded.
+{-# INLINE probe #-}
+probe :: RectTable -> Int -> IO Int
+probe rt k = do
+  MBox keys <- readIORef (rtKeys rt)
+  cap <- readIORef (rtCap rt)
+  let !(I# k#) = k
+      !(I# max#) = cap - 1
+      !(I# start#) = k .&. (cap - 1)
+      go i# s = case readIntArray# keys i# s of
+        (# s', key# #)
+          | isTrue# (key# ==# 0#) -> (# s', -1 #)
+          | isTrue# (key# ==# k#) -> (# s', I# i# #)
+          | otherwise -> go (if isTrue# (i# ==# max#) then 0# else i# +# 1#) s'
+  IO (go start#)
+
+-- | The rect stored at an entry index.
+{-# INLINE readRectAt #-}
+readRectAt :: RectTable -> Int -> IO Rect
+readRectAt rt (I# i#) = do
+  MBox rects <- readIORef (rtRects rt)
+  let base# = i# *# 4#
+  IO $ \s -> case readFloatArray# rects base# s of
+    (# s1, x #) -> case readFloatArray# rects (base# +# 1#) s1 of
+      (# s2, y #) -> case readFloatArray# rects (base# +# 2#) s2 of
+        (# s3, w #) -> case readFloatArray# rects (base# +# 3#) s3 of
+          (# s4, h #) -> (# s4, Rect (F# x) (F# y) (F# w) (F# h) #)
+
 -- | The rect recorded under a slot this frame, if any.
 lookupRect :: RectTable -> Int -> IO (Maybe Rect)
 lookupRect rt k = do
-  MBox keys <- readIORef (rtKeys rt)
-  MBox rects <- readIORef (rtRects rt)
-  cap <- readIORef (rtCap rt)
-  let !(I# k#) = k
-      !(I# max#) = cap - 1
-      !(I# start#) = k .&. (cap - 1)
-      readFloats :: Int# -> State# RealWorld -> (# State# RealWorld, Float#, Float#, Float#, Float# #)
-      readFloats base# s =
-        case readFloatArray# rects base# s of
-          (# s1, x #) -> case readFloatArray# rects (base# +# 1#) s1 of
-            (# s2, y #) -> case readFloatArray# rects (base# +# 2#) s2 of
-              (# s3, w #) -> case readFloatArray# rects (base# +# 3#) s3 of
-                (# s4, h #) -> (# s4, x, y, w, h #)
-      go :: Int# -> IO (Maybe Rect)
-      go i# = IO $ \s -> case readIntArray# keys i# s of
-        (# s', key# #)
-          | isTrue# (key# ==# 0#) -> (# s', Nothing #)
-          | isTrue# (key# ==# k#) -> case readFloats (i# *# 4#) s' of
-              (# s'', x, y, w, h #) -> (# s'', Just (Rect (F# x) (F# y) (F# w) (F# h)) #)
-          | otherwise -> case go (next i#) of
-              IO cont -> cont s'
-      next i# = if isTrue# (i# ==# max#) then 0# else i# +# 1#
-  go start#
+  i <- probe rt k
+  if i < 0 then pure Nothing else Just <$> readRectAt rt i
 
 -- | Whether a slot was recorded this frame.
 memberRect :: RectTable -> Int -> IO Bool
-memberRect rt k = do
-  MBox keys <- readIORef (rtKeys rt)
-  cap <- readIORef (rtCap rt)
-  let !(I# k#) = k
-      !(I# max#) = cap - 1
-      !(I# start#) = k .&. (cap - 1)
-      go :: Int# -> IO Bool
-      go i# = IO $ \s -> case readIntArray# keys i# s of
-        (# s', key# #)
-          | isTrue# (key# ==# 0#) -> (# s', False #)
-          | isTrue# (key# ==# k#) -> (# s', True #)
-          | otherwise -> case go (next i#) of
-              IO cont -> cont s'
-      next i# = if isTrue# (i# ==# max#) then 0# else i# +# 1#
-  go start#
+memberRect rt k = (>= 0) <$> probe rt k
 
 -- | Every recorded slot and rect, in slot order, for hosts and tests.
 rectTableToList :: RectTable -> IO [(Int, Rect)]
 rectTableToList rt = do
   MBox keys <- readIORef (rtKeys rt)
-  MBox rects <- readIORef (rtRects rt)
   cap <- readIORef (rtCap rt)
   let
       collect :: Int -> [(Int, Rect)] -> IO [(Int, Rect)]
@@ -235,12 +199,6 @@ rectTableToList rt = do
             if key == 0
               then collect (i - 1) acc
               else do
-                let !(I# base#) = i * 4
-                r <-
-                  IO $ \s -> case readFloatArray# rects base# s of
-                    (# s1, x #) -> case readFloatArray# rects (base# +# 1#) s1 of
-                      (# s2, y #) -> case readFloatArray# rects (base# +# 2#) s2 of
-                        (# s3, w #) -> case readFloatArray# rects (base# +# 3#) s3 of
-                          (# s4, h #) -> (# s4, Rect (F# x) (F# y) (F# w) (F# h) #)
+                r <- readRectAt rt i
                 collect (i - 1) ((key, r) : acc)
   collect (cap - 1) []

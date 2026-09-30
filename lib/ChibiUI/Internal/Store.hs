@@ -9,6 +9,7 @@ module ChibiUI.Internal.Store
   , fieldDyn
   , overField
   , lookupSlot
+  , lookupDyn
   , findSlot
   , memberSlot
   , insertSlot
@@ -17,7 +18,8 @@ module ChibiUI.Internal.Store
   , slotKey
   ) where
 
-import Data.Dynamic (Dynamic)
+import Data.Dynamic (Dynamic, fromDynamic)
+import Data.Typeable (Typeable)
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 import ChibiUI.Internal.Id (mix64)
@@ -63,6 +65,11 @@ overField (Field get set) f st = set (f (get st)) st
 lookupSlot :: Field a -> Int -> WidgetStore -> Maybe a
 lookupSlot field k = IM.lookup k . fieldMap field
 
+-- | A runtime-typed slot's value, when it holds one of the expected type.
+{-# INLINE lookupDyn #-}
+lookupDyn :: Typeable a => Int -> WidgetStore -> Maybe a
+lookupDyn k st = lookupSlot fieldDyn k st >>= fromDynamic
+
 -- | The slot's value, or @def@ while it has none.
 {-# INLINE findSlot #-}
 findSlot :: Field a -> a -> Int -> WidgetStore -> a
@@ -85,16 +92,12 @@ deleteSlot field k = overField field (IM.delete k)
 
 -- | Every built-in slot.
 data Slot
-  = -- | A text field's caret, in characters.
-    SlotCursor
-  | -- | A scroll region's y offset.
+  = -- | A scroll region's y offset.
     SlotScrollY
   | -- | A scroll region's content extent.
     SlotScrollExtent
   | -- | A table's selected row index, plus one; 0 is none.
     SlotTableSel
-  | -- | A numeric field's held stepper direction: 1 up, -1 down.
-    SlotNumericHeld
   | SlotTextScroll
   | SlotTextClick
   | SlotTextCommand

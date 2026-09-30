@@ -19,7 +19,7 @@ module ChibiUI.Rgfw.Internal.Gl
   , readRetainedPixels
   ) where
 
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Bits (shiftR, (.&.))
 import Data.IORef
 import Data.Int (Int32)
@@ -116,13 +116,9 @@ renderFrameGl r font !scale !fbW !fbH bg drawData damage = do
       began <- c_begin h (fromIntegral fbW) (fromIntegral fbH) scale bgR bgG bgB (if full then 1 else 0)
       when (began == 0) $ fail "chibi-ui: retained framebuffer setup failed"
       uploadGeometry h drawData
-      if full
-        then drawAllCommands h scale fbW fbH drawData
-        else case damage of
-          DamageRects rs -> drawDamagedCommands h scale fbW fbH drawData rs bgR bgG bgB
-          -- Unreachable: damage-free frames present above, unless an atlas
-          -- or size change forced a full frame.
-          _ -> drawAllCommands h scale fbW fbH drawData
+      case damage of
+        DamageRects rs | not full -> drawDamagedCommands h scale fbW fbH drawData rs bgR bgG bgB
+        _ -> drawAllCommands h scale fbW fbH drawData
       c_present h
   writeIORef (glFrameSize r) (fbW, fbH)
 
@@ -139,26 +135,33 @@ uploadGeometry h drawData =
         ip
         (fromIntegral (drawIndexCount drawData))
 
+-- | Draw one command scissored to a logical rectangle, when the rectangle
+-- covers any of the framebuffer.
+drawCmdIn :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawCmd -> Rect -> IO ()
+drawCmdIn h !scale !fbW !fbH cmd box =
+  case physClip scale fbW fbH box of
+    Nothing -> pure ()
+    Just (x0, y0, x1, y1) ->
+      c_drawGeometry
+        h
+        (fromIntegral x0)
+        (fromIntegral y0)
+        (fromIntegral x1)
+        (fromIntegral y1)
+        (cmdIndexOffset cmd)
+        (cmdIndexCount cmd)
+        (fromIntegral (cmdTextureId cmd))
+
 -- | Every command under its own clip: the whole-frame repaint.
 drawAllCommands :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> IO ()
 drawAllCommands h !scale !fbW !fbH drawData =
   forM_ (drawCommands drawData) $ \cmd ->
     when (cmdIndexCount cmd >= 3) $
-      case physClip scale fbW fbH (cmdRectOf cmd) of
-        Nothing -> pure ()
-        Just (x0, y0, x1, y1) ->
-          c_drawGeometry
-            h
-            (fromIntegral x0)
-            (fromIntegral y0)
-            (fromIntegral x1)
-            (fromIntegral y1)
-            (cmdIndexOffset cmd)
-            (cmdIndexCount cmd)
-            (fromIntegral (cmdTextureId cmd))
+      drawCmdIn h scale fbW fbH cmd (cmdClipRect cmd)
 
 -- | Clear the damaged rectangles, then redraw each command that intersects
 -- one, scissored to the overlap, into the still-retained pixels around it.
+-- A command's quad bounds are walked only when its clip meets some damage.
 drawDamagedCommands :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> [Rect] -> Float -> Float -> Float -> IO ()
 drawDamagedCommands h !scale !fbW !fbH drawData rects bgR bgG bgB = do
   forM_ rects $ \dmg ->
@@ -168,21 +171,11 @@ drawDamagedCommands h !scale !fbW !fbH drawData rects bgR bgG bgB = do
         c_clearRegion h (fromIntegral x0) (fromIntegral y0) (fromIntegral x1) (fromIntegral y1) bgR bgG bgB
   forM_ (drawCommands drawData) $ \cmd ->
     when (cmdIndexCount cmd >= 3) $ do
-      bounds <- commandQuadBounds drawData cmd
-      forM_ rects $ \dmg ->
-        when (rectsOverlap bounds dmg) $
-          case physClip scale fbW fbH =<< rectIntersect (cmdRectOf cmd) dmg of
-            Nothing -> pure ()
-            Just (x0, y0, x1, y1) ->
-              c_drawGeometry
-                h
-                (fromIntegral x0)
-                (fromIntegral y0)
-                (fromIntegral x1)
-                (fromIntegral y1)
-                (cmdIndexOffset cmd)
-                (cmdIndexCount cmd)
-                (fromIntegral (cmdTextureId cmd))
+      let hits = [(dmg, box) | dmg <- rects, Just box <- [rectIntersect (cmdClipRect cmd) dmg]]
+      when (not (null hits)) $ do
+        bounds <- commandQuadBounds drawData cmd
+        forM_ hits $ \(dmg, box) ->
+          when (rectsOverlap bounds dmg) (drawCmdIn h scale fbW fbH cmd box)
 
 -- | The retained frame's pixels, RGBA rows bottom row first. For debugging
 -- what a frame drew.
@@ -228,7 +221,9 @@ uploadImagesGl r images = do
           (fromIntegral (ieHeight e))
           (castPtr p)
       pure (ok /= 0)
-  writeIORef (glImages r) (IM.map ieVersion images `IM.union` uploaded)
+  -- Unchanged frames, the common case, leave the map as it is.
+  unless (null changed) $
+    writeIORef (glImages r) (foldl' (\m (img, e) -> IM.insert img (ieVersion e) m) uploaded changed)
   pure (or oks)
 
 -- | Scale a logical clip rect to physical pixels and intersect it with a
@@ -251,13 +246,3 @@ colorFloats :: Color -> (Float, Float, Float, Float)
 colorFloats (Color w) = (chan 24, chan 16, chan 8, chan 0)
   where
     chan s = fromIntegral ((w `shiftR` s) .&. 0xFF) / 255
-
--- | A command's clip rectangle in logical pixels.
-cmdRectOf :: DrawCmd -> Rect
-cmdRectOf cmd = Rect (cmdClipX cmd) (cmdClipY cmd) (cmdClipW cmd) (cmdClipH cmd)
-
--- | Whether two rectangles share positive area.
-rectsOverlap :: Rect -> Rect -> Bool
-rectsOverlap a b = case rectIntersect a b of
-  Just _ -> True
-  Nothing -> False

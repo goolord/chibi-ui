@@ -16,7 +16,7 @@ module ChibiUI.Internal.Monad
   , scoped
   , withKey
   -- * Store
-  , storeModify
+  , storeUpdate
   , storeRead
   , slotOf
   -- * Application model
@@ -27,6 +27,8 @@ module ChibiUI.Internal.Monad
   , modify'
   -- * Placement
   , place
+  , layoutState
+  , readLayout
   , availableWidth
   , textSize
   , measureText
@@ -54,19 +56,16 @@ module ChibiUI.Internal.Monad
   , windowWidth
   , uiTime
   , scrollDelta
-  , typedText
   -- * Interaction
   , hovered
   , claimActive
   , isActive
-  , dropActive
   , isFocused
   , requestFocus
   , blurFocus
   , addFocusable
   , wantCursor
   , recordRect
-  , prevRect
   -- * Drawing
   , theme
   , withTheme
@@ -92,7 +91,6 @@ import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad (when)
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), withReaderT)
 import Control.Monad.State.Class (MonadState (..), gets, modify, modify')
-import Data.Bits (xor)
 import qualified Data.ByteString as BS
 import Data.IORef
 import qualified Data.IntMap.Strict as IM
@@ -113,9 +111,9 @@ import ChibiUI.Internal.Id
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (LayoutState)
 import qualified ChibiUI.Internal.Layout as Layout
-import ChibiUI.Internal.RectTable (insertRect, lookupRect)
+import ChibiUI.Internal.RectTable (insertRect)
 import ChibiUI.Internal.Store
-import ChibiUI.Internal.Style (Theme (..), TextAlign, alignedTextY, fieldPad)
+import ChibiUI.Internal.Style (Theme (..), TextAlign, alignedTextY, fieldHeight)
 import ChibiUI.Internal.Types
 
 -- | A view, or one widget's body, with access to an application model.
@@ -180,8 +178,7 @@ nextId = do
     cid <- readIORef (ctxIdPath ctx)
     sib <- readIORef (ctxIdSib ctx)
     writeIORef (ctxIdSib ctx) (sib + 1)
-    let raw = mix64 cid sib
-    pure (if raw == 0 then WidgetId 1 else WidgetId raw)
+    pure (idContextWidgetId (IdContext cid sib))
 
 -- | Run a container's body: the next sibling position becomes the child
 -- path, and the body's widgets count from a fresh sibling counter.
@@ -192,7 +189,7 @@ scoped = withIdScope (enterScope scopeTag)
 -- order changes keep their state. The same key twice in one container is
 -- two widgets sharing an id.
 withKey :: Text -> ChibiUI model a -> ChibiUI model a
-withKey key = withIdScope (enterKeyed (fnv1a (T.unpack key)))
+withKey key = withIdScope (enterKeyed (fnv1a key))
 
 withIdScope :: (IdContext -> (IdContext, IdContext)) -> ChibiUI model a -> ChibiUI model a
 withIdScope enter body = do
@@ -209,26 +206,19 @@ withIdScope enter body = do
     writeIORef (ctxIdSib ctx) (siblingId parent')
   pure a
 
-fnv1a :: String -> Word64
-fnv1a =
-  foldl'
-    (\acc c -> ((fromIntegral (fromEnum c) :: Word64) `xor` acc) * 0x00000100000001B3)
-    0xcbf29ce484222325
+fnv1a :: Text -> Word64
+fnv1a = T.foldl' (\acc c -> mixFnv acc (fromIntegral (fromEnum c))) 0xcbf29ce484222325
 
 -- | The hashed key of a widget id, as the store addresses it.
 {-# INLINE slotOf #-}
 slotOf :: WidgetId -> Int
 slotOf = fromIntegral . hashWidgetId
 
--- | Read and write the store in one go.
-storeModify :: (WidgetStore -> (a, WidgetStore)) -> ChibiUI model a
-storeModify f = do
+-- | Update the store.
+storeUpdate :: (WidgetStore -> WidgetStore) -> ChibiUI model ()
+storeUpdate f = do
   ctx <- ask
-  liftIO $ do
-    st <- readIORef (ctxStore ctx)
-    let (a, st') = f st
-    writeIORef (ctxStore ctx) st'
-    pure a
+  liftIO (modifyIORef' (ctxStore ctx) f)
 
 -- | Read the store.
 storeRead :: (WidgetStore -> a) -> ChibiUI model a
@@ -245,7 +235,7 @@ place sz = do
   gap' <- themeGap <$> theme
   layoutState (Layout.placeLayout gap' sz)
 
--- The effect boundary for pure cursor transitions.
+-- | The effect boundary for pure cursor transitions.
 layoutState :: (LayoutState -> (a, LayoutState)) -> ChibiUI model a
 layoutState transition = do
   ctx <- ask
@@ -255,6 +245,12 @@ layoutState transition = do
     next `seq` writeIORef (ctxLayout ctx) next
     pure result
 
+-- | The cursor as it stands.
+readLayout :: ChibiUI model LayoutState
+readLayout = do
+  ctx <- ask
+  liftIO (readIORef (ctxLayout ctx))
+
 layoutCommand :: Layout.LayoutCommand -> ChibiUI model ()
 layoutCommand command = do
   gap' <- themeGap <$> theme
@@ -262,9 +258,7 @@ layoutCommand command = do
 
 -- | Remaining width at the cursor, accounting for siblings and indentation.
 availableWidth :: ChibiUI model Float
-availableWidth = do
-  ctx <- ask
-  liftIO (Layout.remainingWidth <$> readIORef (ctxLayout ctx))
+availableWidth = Layout.remainingWidth <$> readLayout
 
 -- | The width of one line of text, in logical pixels.
 measureText :: Text -> ChibiUI model Float
@@ -405,10 +399,6 @@ setUiScale scale = when (not (isNaN scale || isInfinite scale)) $ do
   liftIO (writeIORef (ctxScaleOverride ctx) (max 0 scale))
   requestFrame
 
--- | The text typed this frame, for fields.
-typedText :: ChibiUI model Text
-typedText = T.pack . inputChars <$> getInput
-
 -- | The window's size, in logical pixels.
 windowSize :: ChibiUI model Size
 windowSize = inputWindowSize <$> getInput
@@ -458,12 +448,6 @@ isActive wid = do
   ctx <- ask
   liftIO ((== wid) <$> readIORef (ctxActive ctx))
 
--- | Release the pointer grab.
-dropActive :: ChibiUI model ()
-dropActive = do
-  ctx <- ask
-  liftIO (writeIORef (ctxActive ctx) noWidget)
-
 -- | Whether the widget has keyboard focus.
 isFocused :: WidgetId -> ChibiUI model Bool
 isFocused wid = (== wid) <$> readFocus
@@ -482,15 +466,14 @@ blurFocus = do
   ctx <- ask
   liftIO (writeIORef (ctxFocus ctx) noWidget)
 
--- | Mark a widget as reachable with Tab, in declaration order.
-addFocusable :: WidgetId -> ChibiUI model ()
-addFocusable wid = do
+-- | Mark a widget placed at @r@ as reachable with Tab, in declaration
+-- order, while any of it shows through the clip.
+addFocusable :: WidgetId -> Rect -> ChibiUI model ()
+addFocusable wid r = do
   ctx <- ask
   liftIO $ do
-    rects <- readIORef (ctxRects ctx)
-    rect <- lookupRect rects (slotOf wid)
     clip <- currentClip (ctxArena ctx)
-    when (maybe False (maybe False (const True) . rectIntersect clip) rect) $
+    when (rectsOverlap clip r) $
       modifyIORef' (ctxFocusables ctx) (wid :)
 
 -- | Ask for a pointer shape while the pointer is over this widget.
@@ -509,15 +492,6 @@ recordRect wid r = do
   liftIO $ do
     rects <- readIORef (ctxRects ctx)
     insertRect rects (slotOf wid) r
-
--- | Where the widget landed last frame, for hit tests that must survive
--- the frame a layout change happens in.
-prevRect :: WidgetId -> ChibiUI model (Maybe Rect)
-prevRect wid = do
-  ctx <- ask
-  liftIO $ do
-    prev <- readIORef (ctxPrevRects ctx)
-    lookupRect prev (slotOf wid)
 
 -- | The theme, for colours and spacing.
 theme :: ChibiUI model Theme
@@ -543,7 +517,7 @@ withTextAlign align body = do
 -- | Give the next label the standard field height, aligning captions with
 -- their neighboring text/number input in a row.
 alignTextToFrame :: ChibiUI model ()
-alignTextToFrame = nextHeight (lineHeight + fieldPad * 2 + 2)
+alignTextToFrame = nextHeight fieldHeight
 
 -- | Emit into the draw list. The arena's clip and texture are whatever the
 -- caller left them as; save and restore if that matters.
@@ -584,19 +558,24 @@ drawTextIn r t col = do
 -- vertically. Clipped to the current clip only.
 drawTextAt :: V2 -> Float -> Float -> Text -> Color -> ChibiUI model ()
 drawTextAt (V2 x y) ax ay t col = do
-  w <- measureText t
+  w <- if ax == 0 then pure 0 else measureText t
   drawGlyphs (x - w * ax) (y - lineHeight * ay) t col
 
--- All text paths share atlas selection and quad emission.
+-- All text paths share atlas selection and quad emission. A line that
+-- lies clear of the clip, by a line height of margin for glyphs that
+-- overhang their box, emits nothing and skips the glyph walk.
 drawGlyphs :: Float -> Float -> Text -> Color -> ChibiUI model ()
 drawGlyphs x y t col = do
   ctx <- ask
   liftIO $ do
     let a = ctxArena ctx
-    font <- readIORef (ctxFont ctx)
-    setTexture a texGlyphAtlas
-    fontDrawText font a x y col t
-    setTexture a texFlat
+    Rect cx cy cw ch <- currentClip a
+    when (cw > 0 && ch > 0 && x < cx + cw + lineHeight
+      && y < cy + ch + lineHeight && y + lineHeight * 2 > cy) $ do
+      font <- readIORef (ctxFont ctx)
+      setTexture a texGlyphAtlas
+      fontDrawText font a x y col t
+      setTexture a texFlat
 
 -- | Centre one line of text in a rectangle.
 textInRect :: Rect -> Text -> Color -> ChibiUI model ()

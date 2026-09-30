@@ -4,12 +4,10 @@
 -- as four floats, and UV, so the C renderer needs no adaptation beyond its
 -- name. Texture ids: 0 is flat geometry, 1 the glyph atlas, and 2 or more
 -- are backend-registered images.
-{-# LANGUAGE UnboxedTuples #-}
-{-# LANGUAGE MagicHash #-}
-
 module ChibiUI.Internal.Draw
   ( DrawArena
   , DrawCmd (..)
+  , cmdClipRect
   , DrawData (..)
   , newDrawArena
   , resetDrawArena
@@ -30,13 +28,12 @@ module ChibiUI.Internal.Draw
 
 import Control.Monad (when)
 import Data.IORef
+import Data.Maybe (fromMaybe)
 import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (ForeignPtr, mallocForeignPtrBytes, withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (pokeByteOff)
-import GHC.Exts (Int (..), MutableByteArray#, RealWorld, newByteArray#, readIntArray#, writeIntArray#)
-import GHC.IO (IO (IO))
 import ChibiUI.Internal.Types
   ( Color (..)
   , Rect (..)
@@ -44,31 +41,9 @@ import ChibiUI.Internal.Types
   , colorB
   , colorG
   , colorR
+  , rectIntersect
   )
-
--- | One unboxed mutable 'Int' cell. The arena's per-quad counters live in
--- these because an @IORef Int@ writes a freshly boxed 'Int' on every
--- update, which at a quad per glyph is real garbage; these write in place.
-data URef = URef !(MutableByteArray# RealWorld)
-
-{-# INLINE newURef #-}
-newURef :: Int -> IO URef
-newURef (I# n#) =
-  IO $ \s -> case newByteArray# 8# s of
-    (# s', cell #) -> case writeIntArray# cell 0# n# s' of
-      s'' -> (# s'', URef cell #)
-
-{-# INLINE readURef #-}
-readURef :: URef -> IO Int
-readURef (URef cell) =
-  IO $ \s -> case readIntArray# cell 0# s of
-    (# s', n# #) -> (# s', I# n# #)
-
-{-# INLINE writeURef #-}
-writeURef :: URef -> Int -> IO ()
-writeURef (URef cell) (I# n#) =
-  IO $ \s -> case writeIntArray# cell 0# n# s of
-    s' -> (# s', () #)
+import ChibiUI.Internal.URef
 
 -- | Packed vertex stride in bytes: 32.
 vertexSize :: Int
@@ -102,6 +77,11 @@ data DrawCmd = DrawCmd
   , cmdIndexCount :: {-# UNPACK #-} !Word32
   }
   deriving (Eq, Show)
+
+-- | A command's clip rectangle in logical pixels.
+{-# INLINE cmdClipRect #-}
+cmdClipRect :: DrawCmd -> Rect
+cmdClipRect c = Rect (cmdClipX c) (cmdClipY c) (cmdClipW c) (cmdClipH c)
 
 -- | One frame's geometry and batches. Vertex and index pointers refer to
 -- reusable arena storage: render or copy them before running another frame
@@ -278,14 +258,7 @@ pushClip a r = do
 -- allocates only the saved clip and the intersection itself.
 {-# INLINE clipIntersect #-}
 clipIntersect :: Rect -> Rect -> Rect
-clipIntersect (Rect x1 y1 w1 h1) (Rect x2 y2 w2 h2) =
-  let !x = max x1 x2
-      !y = max y1 y2
-      !xEnd = min (x1 + w1) (x2 + w2)
-      !yEnd = min (y1 + h1) (y2 + h2)
-   in if xEnd > x && yEnd > y
-        then Rect x y (xEnd - x) (yEnd - y)
-        else Rect 0 0 0 0
+clipIntersect a b = fromMaybe (Rect 0 0 0 0) (rectIntersect a b)
 
 -- | Restore the clip pushed last.
 popClip :: DrawArena -> IO ()

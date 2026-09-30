@@ -21,14 +21,12 @@ module ChibiUI.Internal.Widgets
   ) where
 
 import Control.Monad (foldM, forM, forM_, when, void)
-import Data.IORef (readIORef, writeIORef)
-import Data.Maybe (fromMaybe)
-import Data.Dynamic (fromDynamic, toDyn)
+import Data.Maybe (fromMaybe, isJust)
+import Data.Dynamic (toDyn)
 import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
-import ChibiUI.Internal.Context (Context (..))
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
@@ -71,10 +69,7 @@ button t = do
     Size w h <- textSize t
     pure (Size (w + widgetPad * 2) (h + widgetPad * 2))
   th <- theme
-  clicked <- activate wid r
-  hov <- hovered r
-  act <- isActive wid
-  focused <- isFocused wid
+  (clicked, hov, act, focused) <- activate wid r
   let surface
         | act = themeSurfaceActive th
         | hov = themeSurfaceHover th
@@ -84,19 +79,29 @@ button t = do
   textInRect r t (themeText th)
   pure clicked
 
--- Buttons and tree headers share pointer capture and keyboard activation.
-activate :: WidgetId -> Rect -> ChibiUI model Bool
-activate wid r = do
-  addFocusable wid
+-- Buttons, tree headers and sliders share Tab reachability, the pointer
+-- grab a press takes (with the keyboard), and the hover cursor. Returns
+-- whether the widget is hovered, holds the grab, and has focus.
+grab :: WidgetId -> Rect -> ChibiUI model (Bool, Bool, Bool)
+grab wid r = do
+  addFocusable wid r
   hov <- hovered r
   pressed <- mousePressed
-  released <- mouseReleased
   when (hov && pressed) (void (claimActive wid) >> requestFocus wid)
   act <- isActive wid
   focused <- isFocused wid
-  inp <- getInput
   when hov (wantCursor UiCursorPointer)
-  pure ((released && act && hov) || (focused && (pressedIn KeyEnter inp || pressedIn KeySpace inp)))
+  pure (hov, act, focused)
+
+-- Buttons and tree headers also click on release over the widget, or on
+-- Enter/Space while focused. Returns the click with 'grab''s state.
+activate :: WidgetId -> Rect -> ChibiUI model (Bool, Bool, Bool, Bool)
+activate wid r = do
+  (hov, act, focused) <- grab wid r
+  released <- mouseReleased
+  inp <- getInput
+  let clicked = (released && act && hov) || (focused && (pressedIn KeyEnter inp || pressedIn KeySpace inp))
+  pure (clicked, hov, act, focused)
 
 -- | A collapsible branch, initially closed. Click or Enter/Space toggles;
 -- Left closes and Right opens a focused header. Children run only while open.
@@ -110,19 +115,16 @@ treeNode title body = column $ do
   let key = slotKey SlotTreeOpen (slotOf wid)
       gutter = lineHeight + widgetPad
   wasOpen <- storeRead (memberSlot fieldInt key)
-  clicked <- activate wid r
-  focused <- isFocused wid
+  (clicked, hov, active, focused) <- activate wid r
   inp <- getInput
   let open | focused && pressedIn KeyLeft inp = False
            | focused && pressedIn KeyRight inp = True
            | clicked = not wasOpen
            | otherwise = wasOpen
   when (open /= wasOpen) $ do
-    storeModify (\st -> ((), (if open then insertSlot fieldInt key 1 else deleteSlot fieldInt key) st))
+    storeUpdate (if open then insertSlot fieldInt key 1 else deleteSlot fieldInt key)
     requestFrame
   th <- theme
-  hov <- hovered r
-  active <- isActive wid
   withClip r $ do
     when (hov || active) (fillRectUI r (if active then themeSurfaceActive th else themeSurfaceHover th))
     when focused (strokeRectUI r 1 (themeAccent th))
@@ -149,7 +151,7 @@ textArea value = textField MultiLine measured (sanitizeText True value) (const i
   where
     measured = do
       width <- availWidth
-      pure (Size (min width 320) (lineHeight * 5 + fieldPad * 2 + 2))
+      pure (Size (min width 320) (fieldHeight + lineHeight * 4))
 
 -- | A read-only, selectable/copyable line without field chrome.
 selectableText :: Text -> ChibiUI model ()
@@ -171,8 +173,11 @@ floatInput :: Float -> ChibiUI model Float
 floatInput = numberInput
 
 numberInput :: (Eq a, Num a, Read a, Show a) => a -> ChibiUI model a
-numberInput value = parseNumber value <$>
-  textField SingleLine (fieldSize 120) (T.pack (show value)) (stepNumber value)
+numberInput value = do
+  let shown = T.pack (show value)
+  t <- textField SingleLine (fieldSize 120) shown (stepNumber value)
+  -- An untouched field hands back the value it showed; skip the parse.
+  pure (if t == shown then value else parseNumber value t)
 
 parseNumber :: Read a => a -> Text -> a
 parseNumber fallback = fromMaybe fallback . readMaybe . T.unpack . T.strip
@@ -180,7 +185,7 @@ parseNumber fallback = fromMaybe fallback . readMaybe . T.unpack . T.strip
 fieldSize :: Float -> ChibiUI model Size
 fieldSize width = do
   avail <- availWidth
-  pure (Size (min avail width) (lineHeight + fieldPad * 2 + 2))
+  pure (Size (min avail width) fieldHeight)
 
 -- | A horizontal slider for @value@ between @lo@ and @hi@: drag the thumb
 -- or click the track to set it, and Left/Right step a focused slider by a
@@ -189,21 +194,17 @@ slider :: Float -> Float -> Float -> ChibiUI model Float
 slider value lo hi = do
   (wid, r) <- widgetRect $ do
     avail <- availWidth
-    pure (Size (min avail 160) (lineHeight + fieldPad * 2 + 2))
-  addFocusable wid
+    pure (Size (min avail 160) fieldHeight)
   th <- theme
-  hov <- hovered r
-  pressed <- mousePressed
-  when (hov && pressed) (void (claimActive wid) >> requestFocus wid)
-  act <- isActive wid
+  (_, act, focused) <- grab wid r
   held <- mouseHeld
-  focused <- isFocused wid
   inp <- getInput
-  when (hov || act) (wantCursor UiCursorPointer)
+  -- A dragged thumb keeps the pointer cursor off the track.
+  when act (wantCursor UiCursorPointer)
   let range = hi - lo
-      frac v = if range > 0 then clamp 0 1 ((v - lo) / range) else 0
+      frac v = if range > 0 then clamp01 ((v - lo) / range) else 0
       atFrac f = lo + f * range
-      underPointer = clamp 0 1 ((v2X (inputMousePos inp) - rectX r) / max 1 (rectW r))
+      underPointer = clamp01 ((v2X (inputMousePos inp) - rectX r) / max 1 (rectW r))
       step = range / 10
       moved
         | act && held = atFrac underPointer
@@ -252,7 +253,7 @@ stepField event state = case (event, state) of
 textField :: FieldMode -> ChibiUI model Size -> Text -> (Input -> Text -> Text) -> ChibiUI model Text
 textField mode measure value transform = do
   (wid, r) <- widgetRect measure
-  addFocusable wid
+  addFocusable wid r
   editTextField mode wid r value transform
 
 -- Stepping updates the same draft that is painted and subsequently edited.
@@ -280,7 +281,7 @@ editTextField mode wid r value transform = do
   inp <- getInput
   when (hov && (pressed || pressedIn MouseRight inp)) (requestFocus wid)
   focused <- isFocused wid
-  saved <- storeRead (fromMaybe (Inactive (newEditor value)) . (>>= fromDynamic) . lookupSlot fieldDyn k)
+  saved <- storeRead (fromMaybe (Inactive (newEditor value)) . lookupDyn k)
   let hadDraft = editing saved
       started = if focused then stepField (BeginEdit value) saved else saved
       state = if readOnly && editText (editState (fieldEditor started)) /= value
@@ -294,7 +295,7 @@ editTextField mode wid r value transform = do
         -- An unchanged state keeps its slot: re-inserting an equal value
         -- rebuilds the store's map for nothing.
         when (next /= saved) $
-          storeModify (\st -> ((), insertSlot fieldDyn k (toDyn next) (reset st)))
+          storeUpdate (insertSlot fieldDyn k (toDyn next) . reset)
         when (focused && not active) blurFocus
         paint (fieldEditor next) active reveal
   case (focused, state) of
@@ -312,7 +313,7 @@ editTextField mode wid r value transform = do
       let hasSelection = uncurry (/=) (selection ed)
           queue cmd = do
             requestFocus wid
-            storeModify (\st -> ((), insertSlot fieldDyn (slotKey SlotTextCommand k) (toDyn cmd) st))
+            storeUpdate (insertSlot fieldDyn (slotKey SlotTextCommand k) (toDyn cmd))
       openContextMenu wid r $
         (if readOnly then [] else [("Undo", not (null (editUndo ed)), queue Undo),
          ("Redo", not (null (editRedo ed)), queue Redo),
@@ -357,7 +358,7 @@ editStep mode wid r ed0 = do
   active <- isActive wid
   offset <- storeRead (findSlot fieldFloat 0 (slotKey SlotTextScroll k))
   offsetY <- storeRead (findSlot fieldFloat 0 (slotKey SlotTextScrollY k))
-  previous <- storeRead ((>>= fromDynamic) . lookupSlot fieldDyn (slotKey SlotTextClick k))
+  previous <- storeRead (lookupDyn (slotKey SlotTextClick k))
   now <- uiTime
   when (active && heldIn MouseLeft inp && not (rectHit r (inputMousePos inp))) requestFrame
   ed1 <- case stepPointer inp hov active now previous of
@@ -372,15 +373,15 @@ editStep mode wid r ed0 = do
           pointed = select anchor caret ed0
       case gesture of
         ClickSelection click@(ClickState _ _ clicks) -> do
-          storeModify (\st -> ((), insertSlot fieldDyn (slotKey SlotTextClick k) (toDyn click) st))
+          storeUpdate (insertSlot fieldDyn (slotKey SlotTextClick k) (toDyn click))
           pure $ case clicks of
             2 -> selectWord caret pointed
             3 | multiline -> select start (start + T.length line) pointed
               | otherwise -> command SelectAll pointed
             _ -> pointed
         _ -> pure pointed
-  pending <- storeRead ((>>= fromDynamic) . lookupSlot fieldDyn (slotKey SlotTextCommand k))
-  storeModify (\st -> ((), deleteSlot fieldDyn (slotKey SlotTextCommand k) st))
+  pending <- storeRead (lookupDyn (slotKey SlotTextCommand k))
+  when (isJust pending) (storeUpdate (deleteSlot fieldDyn (slotKey SlotTextCommand k)))
   let allowed cmd = not readOnly || case cmd of
         Move _ _ -> True
         SelectAll -> True
@@ -419,15 +420,16 @@ drawField mode k r ed focused reveal th = do
       multiline = mode == MultiLine
       pad = if readOnly then 0 else fieldPad
       ls = if multiline then textLines t else [(0, t)]
-      (lineStart, line) = if multiline then caretLine t caret else (0, t)
-      caretRow = if multiline then T.count "\n" (T.take caret t) else 0
+      (caretRow, (lineStart, line)) = caretRowLine ls caret
   when (not readOnly) $ do
     fillRectUI r (themeSurface th)
     strokeRectUI r 1 (if focused then themeAccent th else themeBorder th)
-  caretPen <- measureText (T.take (caret - lineStart) line)
+  -- An unfocused single line never scrolls, so it needs neither the caret
+  -- pen nor the line widths.
+  caretPen <- if focused then measureText (T.take (caret - lineStart) line) else pure 0
   oldShift <- storeRead (findSlot fieldFloat 0 (slotKey SlotTextScroll k))
   oldY <- storeRead (findSlot fieldFloat 0 (slotKey SlotTextScrollY k))
-  widths <- mapM (measureText . snd) ls
+  widths <- if focused || multiline then mapM (measureText . snd) ls else pure []
   hov <- hovered r
   wheel <- scrollDelta
   let innerX = rectX r + pad
@@ -439,7 +441,7 @@ drawField mode k r ed focused reveal th = do
         | pos < offset = pos
         | pos + size > offset + extent = pos + size - extent
         | otherwise = offset
-      shift = clamp 0 (max 0 (maximum widths - innerW + 1)) $
+      shift = clamp 0 (max 0 (maximum (0 : widths) - innerW + 1)) $
         if focused && (reveal || not multiline) then keepVisible caretPen 1 innerW wheelX
         else if multiline then wheelX else 0
       shiftY = if not multiline then 0 else clamp 0 (max 0 (fromIntegral (length ls) * lineHeight - rectH inner)) $
@@ -447,9 +449,9 @@ drawField mode k r ed focused reveal th = do
       top = if multiline then rectY inner - shiftY else alignedTextY (themeTextAlign th) inner
       (a, b) = selection ed
   when (shift /= oldShift) $
-    storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotTextScroll k) shift st))
+    storeUpdate (insertSlot fieldFloat (slotKey SlotTextScroll k) shift)
   when (multiline && shiftY /= oldY) $
-    storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotTextScrollY k) shiftY st))
+    storeUpdate (insertSlot fieldFloat (slotKey SlotTextScrollY k) shiftY)
   withClip inner $ do
     forM_ (zip [0 :: Int ..] ls) $ \(lineIndex, (start, text)) -> do
       let y = top + fromIntegral lineIndex * lineHeight
@@ -467,10 +469,11 @@ drawField mode k r ed focused reveal th = do
     when focused $ do
       t0 <- uiTime
       let blink = floor (t0 * 2) `mod` (2 :: Int) == (0 :: Int)
-      when blink $
-        fillRectUI
-          (Rect (innerX - shift + caretPen) (top + fromIntegral caretRow * lineHeight) 1 lineHeight)
-          (themeText th)
+      -- The caret's quad stays in the draw list while blinked off, so a
+      -- blink changes one quad's colour and damages only the caret.
+      fillRectUI
+        (Rect (innerX - shift + caretPen) (top + fromIntegral caretRow * lineHeight) 1 lineHeight)
+        (if blink then themeText th else colorTransparent)
   when hov (wantCursor UiCursorText)
 
 -- | An image the backend has registered, drawn at @w@ x @h@.
@@ -496,8 +499,7 @@ plotLines values = do
   th <- theme
   fillRectUI r (themeSurface th)
   strokeRectUI r 1 (themeBorder th)
-  let pad = 2
-      inner = Rect (rectX r + pad) (rectY r + pad) (rectW r - pad * 2) (rectH r - pad * 2)
+  let inner = rectInflate (-2) r
       n = length values
       left = rectX inner
       right = rectX inner + rectW inner
@@ -536,11 +538,8 @@ drawPolyline col ps = do
 -- scaled proportionally to fit the available or explicitly assigned width.
 table :: [Text] -> [[Text]] -> ChibiUI model (Maybe Int)
 table headers rows = do
-  wid <- nextId
   th <- theme
-  let k = slotOf wid
-      selKey = slotKey SlotTableSel k
-      cellAt c r = if c < length r then r !! c else ""
+  let cellAt c r = if c < length r then r !! c else ""
       cellPadX = 4
       cellPadY = 3
       colCount = length headers
@@ -549,13 +548,12 @@ table headers rows = do
       hw <- measureText (cellAt c headers)
       rws <- mapM (measureText . cellAt c) rows
       pure (maximum (hw + cellPadX * 2 : map (+ cellPadX * 2) rws))
-  avail <- availWidth
   let totalW = sum naturalWidths
       rowH = lineHeight + cellPadY * 2
       tableH = rowH * fromIntegral (1 + length rows)
-  r <- place (Size (min avail totalW) tableH)
-  recordRect wid r
-  let widths = map (\w -> if totalW > 0 then w * rectW r / totalW else 0) naturalWidths
+  (wid, r) <- widgetRect ((\avail -> Size (min avail totalW) tableH) <$> availWidth)
+  let selKey = slotKey SlotTableSel (slotOf wid)
+      widths = map (\w -> if totalW > 0 then w * rectW r / totalW else 0) naturalWidths
       columns = zip (scanl (+) (rectX r) widths) widths
       drawRow y cells bg = do
         fillRectUI (Rect (rectX r) y (rectW r) rowH) bg
@@ -571,7 +569,7 @@ table headers rows = do
         | otherwise = Nothing
       hoverValid = maybe False (\i -> i >= 0 && i < length rows) hoverI
   when (pressed && hoverValid) $
-    storeModify (\st -> ((), insertSlot fieldInt selKey (fromMaybe 0 hoverI + 1) st))
+    storeUpdate (insertSlot fieldInt selKey (fromMaybe 0 hoverI + 1))
   sel1 <- storeRead (findSlot fieldInt 0 selKey)
   let selIdx = if 1 <= sel1 && sel1 <= length rows then sel1 else 0
   withClip r $ do
@@ -597,10 +595,9 @@ scrollColumn body = do
   let k = slotOf wid
       scrollKey = slotKey SlotScrollY k
       barW = 4
-  ls0 <- readLayout
+  top <- lsLineY <$> readLayout
   avail <- availWidth
-  let top = lsLineY ls0
-      regionH = max 0 (winH - themeWindowPad th - top)
+  let regionH = max 0 (winH - themeWindowPad th - top)
   r <- place (Size avail regionH)
   parent <- readLayout
   recordRect wid r
@@ -612,18 +609,17 @@ scrollColumn body = do
         (scroll0 + if hov then v2Y wheel * scrollStep else 0)
       viewport = r {rectW = max 0 (rectW r - barW)}
       content = viewport {rectY = rectY r - offset}
-  ctx <- askContext
   -- Clip to the region and shift the body up by the scroll.
-  liftIO (writeIORef (ctxLayout ctx) (Layout.beginViewport content parent))
+  layoutState (const ((), Layout.beginViewport content parent))
   a <- withClip viewport (scoped body)
   ls1 <- readLayout
   let contentH = sizeH (Layout.contentSize (V2 (rectX content) (rectY content)) ls1)
       maxScroll = max 0 (contentH - rectH r)
       scroll1 = clamp 0 maxScroll offset
   when (scroll1 /= scroll0) $
-    storeModify (\st -> ((), insertSlot fieldFloat scrollKey scroll1 st))
+    storeUpdate (insertSlot fieldFloat scrollKey scroll1)
   when (contentH /= extent) $
-    storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotScrollExtent k) contentH st))
+    storeUpdate (insertSlot fieldFloat (slotKey SlotScrollExtent k) contentH)
   when (scroll1 /= offset) requestFrame
   -- A scrollbar when the body overflows.
   withClip r $ when (maxScroll > 0) $ do
@@ -632,7 +628,7 @@ scrollColumn body = do
         thumbY = rectY r + (rectH r - thumbH) * (scroll1 / maxScroll)
     fillRectUI trackR (themeSurface th)
     fillRectUI (Rect (rectX trackR) thumbY barW thumbH) (themeBorder th)
-  liftIO (writeIORef (ctxLayout ctx) parent)
+  layoutState (const ((), parent))
   pure a
   where
     scrollStep = lineHeight * 3
@@ -647,8 +643,3 @@ separator = do
 -- | The width a widget filling the line can take.
 availWidth :: ChibiUI model Float
 availWidth = availableWidth
-
-readLayout :: ChibiUI model LayoutState
-readLayout = do
-  ctx <- askContext
-  liftIO (readIORef (ctxLayout ctx))

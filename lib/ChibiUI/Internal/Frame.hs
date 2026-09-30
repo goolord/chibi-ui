@@ -20,19 +20,13 @@ import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
 import ChibiUI.Internal.Types (Rect (..), Size (..))
 
--- | Run one frame: move last frame's rects aside for hit tests, reset the
--- frame state, run the view, then resolve focus (Tab, click-to-unfocus)
+-- | Run one frame: reset the frame state, run the view, then resolve
+-- focus (Tab, click-to-unfocus)
 -- and snapshot the draw list. The window background is the caller's clear;
 -- the view draws everything else.
 runFrame :: Context model -> Input -> ChibiUI model a -> IO (a, DrawData)
 runFrame ctx inp view = do
-  -- Last frame's geometry becomes the hit-test map; this frame records
-  -- afresh. The two tables trade places: the older one clears for reuse.
-  rects <- readIORef (ctxRects ctx)
-  stale <- readIORef (ctxPrevRects ctx)
-  clearRectTable stale
-  writeIORef (ctxPrevRects ctx) rects
-  writeIORef (ctxRects ctx) stale
+  readIORef (ctxRects ctx) >>= clearRectTable
   resetDrawArena (ctxArena ctx)
   pushClip (ctxArena ctx) (Rect 0 0 (sizeW (inputWindowSize inp)) (sizeH (inputWindowSize inp)))
   writeIORef (ctxFocusRequested ctx) False
@@ -56,6 +50,7 @@ runFrame ctx inp view = do
   blocked <- runChibiUI ctx processPopup
   writeIORef (ctxInputBlocked ctx) blocked
   a <- runChibiUI ctx view
+
   -- The pointer grab outlives the widgets only while a button is held.
   -- Clearing after the view lets the active widget see its release this
   -- frame; a widget that stopped being declared cannot drop it itself.

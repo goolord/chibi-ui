@@ -1,8 +1,9 @@
 -- | The RGFW window session: options, the runner, and translation of RGFW
 -- events into 'Input', adapted from nano-ui-rgfw.
 --
--- The loop is simple: wait for events (or a short timeout while a field is
--- focused, for the caret blink, or when a view asked for a frame), fold
+-- The loop is simple: wait for events (or until the caret's next blink
+-- while a widget is focused, or a short timeout when a view asked for a
+-- frame), fold
 -- the event batch into one 'Input', run the view, and render. Rendering
 -- carries rudimentary damage tracking: the frame's draw list is diffed
 -- against the last one, so a frame that changed nothing presents without
@@ -22,11 +23,11 @@ module ChibiUI.Rgfw.Internal.Session
 
 import Control.Concurrent (rtsSupportsBoundThreads, runInBoundThread)
 import Control.Exception (bracket)
-import Control.Monad (unless, void, when)
+import Control.Monad (forM_, unless, void, when)
 import Data.Bits ((.&.), (.|.))
 import Data.Char (chr, isPrint, toLower)
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
+import Data.Maybe (isJust, listToMaybe, mapMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 ()
 import qualified Data.Text as T
@@ -36,7 +37,7 @@ import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Clock (getMonotonicTime)
 import qualified System.Environment
-import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), cmdTextureId, drawCommands, drawVertexCount, texGlyphAtlas)
+import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), texGlyphAtlas, vertexSize)
 import ChibiUI.Internal.Context
   ( Context (..)
   , newContext
@@ -50,11 +51,10 @@ import ChibiUI.Internal.Damage (Damage (..), trackFrame)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
-import ChibiUI.Internal.Font (embeddedFont, newFont)
+import ChibiUI.Internal.Font (Font, fontAtlasPixels, fontAtlasSize, fontFree, newFont)
 import ChibiUI.Internal.Style (Theme, defaultTheme, themeWindow)
-import ChibiUI.Internal.Types (Size (..), V2 (..))
-import ChibiUI.Internal.Font (fontAtlasPixels, fontAtlasSize)
-import ChibiUI.Rgfw.Internal.Gl (freeGlRenderer, newGlRenderer, readRetainedPixels, renderFrameGl, uploadImagesGl)
+import ChibiUI.Internal.Types (Size (..), V2 (..), validScale)
+import ChibiUI.Rgfw.Internal.Gl (GlRenderer, freeGlRenderer, newGlRenderer, readRetainedPixels, renderFrameGl, uploadImagesGl)
 import qualified RGFW as R
 
 -- | Window settings for the RGFW runner. Sizes are in logical pixels.
@@ -78,8 +78,8 @@ data RgfwOptions = RgfwOptions
   -- ^ UI scale, in device pixels per logical pixel. @0@ follows the
   -- monitor's scale.
   , optRefreshHz :: !Int
-  -- ^ Wake pace for a view that asks for frames or blinks a caret; @0@
-  -- means 30 wakes per second at most.
+  -- ^ Wake pace for a view that asks for frames; @0@ means 30 wakes per
+  -- second at most.
   , optFontPath :: !(Maybe FilePath)
   -- ^ A TrueType font to rasterize instead of the embedded Inter subset.
   }
@@ -118,15 +118,15 @@ runChibiAppWith opts initial view = inBoundThread $
       let !refreshHz = if optRefreshHz opts > 0 then optRefreshHz opts else 30
           !timeoutMs = max 1 (floor (1000 / fromIntegral refreshHz :: Double)) :: Int
       monScale0 <- R.windowScale win
-      let monScaleInit = if monScale0 > 0 then monScale0 else 1.0
-          !scaleInit = resolveScale (optScale opts) monScaleInit
+      let !scaleInit = resolveScale (optScale opts) monScale0
       ctx <- newContext initial
-      -- The font: a TTF of the host's choosing, or the embedded subset.
-      fontBytes <- case optFontPath opts of
-        Just p -> BS.readFile p
-        Nothing -> pure embeddedFont
-      font <- newFont fontBytes
-      setFont ctx font
+      -- The font: the context's embedded subset, or a TTF of the host's
+      -- choosing in its place.
+      forM_ (optFontPath opts) $ \p -> do
+        embedded <- readIORef (ctxFont ctx)
+        BS.readFile p >>= newFont >>= setFont ctx
+        fontFree embedded
+      font <- readIORef (ctxFont ctx)
       setTheme ctx (optTheme opts)
       setScale ctx scaleInit
       writeIORef (ctxScaleOverride ctx) (optScale opts)
@@ -147,11 +147,9 @@ runChibiAppWith opts initial view = inBoundThread $
       -- Persistent input: each frame starts from the last, with one-shot
       -- events cleared.
       inputRef <- newIORef emptyInput
-      scaleRef <- newIORef scaleInit
       cursorRef <- newIORef UiCursorDefault
       now0 <- getMonotonicTime
       lastFrameRef <- newIORef now0
-      statsRef <- newIORef (0 :: Int, 0 :: Int, 0 :: Int)
       snapRef <- newIORef Nothing
       let syncCursor = do
             want <- readIORef (ctxCursor ctx)
@@ -162,7 +160,7 @@ runChibiAppWith opts initial view = inBoundThread $
                 then R.setMouseDefault win
                 else R.setMouseStandard win icon
           drainEvents = do
-            scale <- readIORef scaleRef
+            scale <- readIORef (ctxScale ctx)
             evs <- pollRgfwEvents win evPtr scale
             modifyIORef' inputRef (\inp -> foldl' applyRgfwEvent inp evs)
             pure (RgfwEvClose `elem` evs)
@@ -170,17 +168,16 @@ runChibiAppWith opts initial view = inBoundThread $
             (pw, ph) <- R.windowSize win
             monScale <- R.windowScale win
             userScale <- readIORef (ctxScaleOverride ctx)
-            oldScale <- readIORef scaleRef
+            oldScale <- readIORef (ctxScale ctx)
             let s = resolveScale userScale monScale
             when (s /= oldScale) $ do
-              writeIORef scaleRef s
               setScale ctx s
               -- Events drained above used the old scale. Rebase even when
               -- the pointer did not move during this monitor/zoom change.
               modifyIORef' inputRef $ \inp ->
                 let V2 x y = inputMousePos inp
                  in inp {inputMousePos = V2 (x * oldScale / s) (y * oldScale / s)}
-            scale <- readIORef scaleRef
+            scale <- readIORef (ctxScale ctx)
             let logical :: Int -> Float
                 logical v =
                   fromIntegral
@@ -189,7 +186,7 @@ runChibiAppWith opts initial view = inBoundThread $
             modifyIORef' inputRef (\i -> i {inputWindowSize = logicalSize})
           renderAndSwap renderer = do
             inp0 <- readIORef inputRef
-            scale <- readIORef scaleRef
+            scale <- readIORef (ctxScale ctx)
             (pw, ph) <- R.windowSize win
             theme1 <- readIORef (ctxTheme ctx)
             (_, dd) <- runFrame ctx inp0 view
@@ -198,17 +195,6 @@ runChibiAppWith opts initial view = inBoundThread $
             damage0 <- trackFrame snapRef (inputWindowSize inp0) dd
             -- New texture contents repaint the same quads differently.
             let damage = if imagesChanged then DamageFull else damage0
-            let glyphCmds =
-                  foldl'
-                    (\n c -> if cmdTextureId c == texGlyphAtlas then n + 1 else n)
-                    (0 :: Int)
-                    (drawCommands dd)
-            writeIORef
-              statsRef
-              ( drawVertexCount dd
-              , length (drawCommands dd)
-              , glyphCmds
-              )
             renderFrameGl renderer font scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage
             R.swapBuffersGL win
             -- Clear one-shot events and stamp the timing of the frame that
@@ -227,9 +213,16 @@ runChibiAppWith opts initial view = inBoundThread $
             requested <- readIORef (ctxFrameRequest ctx)
             focus <- readIORef (ctxFocus ctx)
             winFocused <- R.windowFocused win
-            let blinkDue = requested || (winFocused && focus /= noWidget)
+            now <- getMonotonicTime
+            -- A focused widget's caret toggles every half second: wake at
+            -- the next toggle rather than at the refresh pace.
+            let untilBlink = max 1 (ceiling ((fromIntegral (floor (now * 2) + 1 :: Int) / 2 - now) * 1000))
+                wait
+                  | requested = timeoutMs
+                  | winFocused && focus /= noWidget = untilBlink
+                  | otherwise = -1
             unless quit $ do
-              R.waitForEvent (if blinkDue then timeoutMs else -1)
+              R.waitForEvent wait
               closed <- drainEvents
               syncWindow
               renderAndSwap renderer
@@ -243,57 +236,63 @@ runChibiAppWith opts initial view = inBoundThread $
         case dumpPath of
           Just path -> do
             (pw, ph) <- R.windowSize win
-            let w = max 1 pw
-                h = max 1 ph
-            pixels <- readRetainedPixels renderer w h
-            let row = w * 4
-                flipped =
-                  BS.concat
-                    [BS.take row (BS.drop ((h - 1 - y) * row) pixels) | y <- [0 .. h - 1]]
-                header =
-                  BS.pack (map (fromIntegral . fromEnum) ("P6\n" ++ show w ++ " " ++ show h ++ "\n255\n"))
-            (aw, ah) <- fontAtlasSize font
-            ptr <- fontAtlasPixels font
-            (nz, maxX, maxY) <-
-              if ptr == nullPtr
-                then pure (0 :: Int, 0 :: Int, 0 :: Int)
-                else do
-                  bytes <- BS.packCStringLen (castPtr ptr, aw * ah)
-                  let ink = BS.elemIndices 0xff bytes
-                      maxX = maximum (0 : [i `mod` aw | i <- ink])
-                      maxY = maximum (0 : [i `div` aw | i <- ink])
-                  pure (BS.length (BS.filter (/= 0) bytes), maxX, maxY)
-            -- P6 stores RGB, while the retained framebuffer is RGBA.
-            let rgb = BS.pack [b | (i, b) <- zip [0 :: Int ..] (BS.unpack flipped), i `mod` 4 /= 3]
-            BS.writeFile (path ++ ".ppm") (header <> rgb)
-            (sv, sc, sg) <- readIORef statsRef
-            -- The first glyph quad's position and UV, against the atlas ink.
-            inpDump <- readIORef inputRef
-            (_, ddx) <- runFrame ctx inpDump view
-            let firstGlyph = listToMaybe [c | c <- drawCommands ddx, cmdTextureId c == texGlyphAtlas]
-            uvDump <- case firstGlyph of
-              Nothing -> pure ("no glyph cmd" :: String)
-              Just c -> withForeignPtr (drawVertices ddx) $ \vp -> do
-                let v0 = fromIntegral (cmdIndexOffset c) :: Int
-                    p = castPtr vp `plusPtr` (v0 * 32)
-                x <- peekByteOff p 0 :: IO Float
-                y <- peekByteOff p 4 :: IO Float
-                u <- peekByteOff p 24 :: IO Float
-                v <- peekByteOff p 28 :: IO Float
-                pure ("first glyph vertex x=" ++ show x ++ " y=" ++ show y ++ " u=" ++ show u ++ " v=" ++ show v)
-            putStrLn
-              ( "dump: " ++ path ++ ".ppm " ++ show (w, h)
-                  ++ " atlas " ++ show (aw, ah)
-                  ++ " nonzero=" ++ show nz
-                  ++ " inkMax(x,y)=" ++ show (maxX, maxY)
-                  ++ " frame: verts=" ++ show sv
-                  ++ " cmds=" ++ show sc
-                  ++ " glyphCmds=" ++ show sg
-                  ++ " | " ++ uvDump
-              )
+            -- Re-run the frame for its draw list: the arena was reused.
+            (_, dd) <- readIORef inputRef >>= \inp -> runFrame ctx inp view
+            dumpFrame renderer font dd path (max 1 pw) (max 1 ph)
           Nothing -> pure ()
         unless (isJust dumpPath) (loop renderer)
-    resolveScale user mon = fromMaybe 1 (foldr (\x acc -> if x > 0 && not (isNaN x || isInfinite x) then Just x else acc) Nothing [user, mon])
+    resolveScale user mon
+      | validScale user = user
+      | validScale mon = mon
+      | otherwise = 1
+
+-- | Write the retained frame to @path.ppm@ and print the atlas ink, the
+-- frame's draw-list stats, and its first glyph quad's position and UV.
+dumpFrame :: GlRenderer -> Font -> DrawData -> FilePath -> Int -> Int -> IO ()
+dumpFrame renderer font dd path w h = do
+  pixels <- readRetainedPixels renderer w h
+  let row = w * 4
+      flipped =
+        BS.concat
+          [BS.take row (BS.drop ((h - 1 - y) * row) pixels) | y <- [0 .. h - 1]]
+      header =
+        BS.pack (map (fromIntegral . fromEnum) ("P6\n" ++ show w ++ " " ++ show h ++ "\n255\n"))
+  (aw, ah) <- fontAtlasSize font
+  ptr <- fontAtlasPixels font
+  (nz, maxX, maxY) <-
+    if ptr == nullPtr
+      then pure (0 :: Int, 0 :: Int, 0 :: Int)
+      else do
+        bytes <- BS.packCStringLen (castPtr ptr, aw * ah)
+        let ink = BS.elemIndices 0xff bytes
+            maxX = maximum (0 : [i `mod` aw | i <- ink])
+            maxY = maximum (0 : [i `div` aw | i <- ink])
+        pure (BS.length (BS.filter (/= 0) bytes), maxX, maxY)
+  -- P6 stores RGB, while the retained framebuffer is RGBA.
+  let rgb = BS.pack [b | (i, b) <- zip [0 :: Int ..] (BS.unpack flipped), i `mod` 4 /= 3]
+  BS.writeFile (path ++ ".ppm") (header <> rgb)
+  let glyphCmds = [c | c <- drawCommands dd, cmdTextureId c == texGlyphAtlas]
+  -- The first glyph quad's position and UV, against the atlas ink.
+  uvDump <- case listToMaybe glyphCmds of
+    Nothing -> pure ("no glyph cmd" :: String)
+    Just c -> withForeignPtr (drawVertices dd) $ \vp -> do
+      let v0 = fromIntegral (cmdIndexOffset c) :: Int
+          p = castPtr vp `plusPtr` (v0 * vertexSize)
+      x <- peekByteOff p 0 :: IO Float
+      y <- peekByteOff p 4 :: IO Float
+      u <- peekByteOff p 24 :: IO Float
+      v <- peekByteOff p 28 :: IO Float
+      pure ("first glyph vertex x=" ++ show x ++ " y=" ++ show y ++ " u=" ++ show u ++ " v=" ++ show v)
+  putStrLn
+    ( "dump: " ++ path ++ ".ppm " ++ show (w, h)
+        ++ " atlas " ++ show (aw, ah)
+        ++ " nonzero=" ++ show nz
+        ++ " inkMax(x,y)=" ++ show (maxX, maxY)
+        ++ " frame: verts=" ++ show (drawVertexCount dd)
+        ++ " cmds=" ++ show (length (drawCommands dd))
+        ++ " glyphCmds=" ++ show (length glyphCmds)
+        ++ " | " ++ uvDump
+    )
 
 -- | The key for an RGFW key code and its modifier bits.
 mapRgfwKey :: Word32 -> Word8 -> Maybe Key

@@ -40,7 +40,7 @@ import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import ChibiUI.Internal.Draw (DrawArena, emitQuadUV)
-import ChibiUI.Internal.Types (Color)
+import ChibiUI.Internal.Types (Color, validScale)
 
 -- | The embedded TrueType font, from nano-ui's SDL backend: a subset of
 -- Inter (SIL OFL).
@@ -73,18 +73,25 @@ data GlyphDev = GlyphDev
   , gdAdvance :: {-# UNPACK #-} !Float
   }
 
--- | The loaded font: the C handle, the font's bytes for scale rebuilds,
--- the metrics the raster size derives from, the device-pixel space
--- advance, and the glyph cache for the current raster size.
+-- | What a scale change rebuilds: the C handle, the scale and the raster
+-- size it gives, the metrics, and the device-pixel space advance. One
+-- strict record, so text calls read it with a single 'readIORef'.
+data FontState = FontState
+  { fsHandle :: !(Ptr ())
+  , fsScale :: {-# UNPACK #-} !Float
+  , fsSize :: {-# UNPACK #-} !Int
+  -- ^ The raster size: the line height in device pixels.
+  , fsFHeight :: {-# UNPACK #-} !Float
+  , fsDescent :: {-# UNPACK #-} !Float
+  , fsSpaceAdv :: {-# UNPACK #-} !Float
+  -- ^ The space glyph's advance at the raster size, in device pixels.
+  }
+
+-- | The loaded font: its bytes for scale rebuilds, the state at the
+-- current scale, and the glyph cache for the current raster size.
 data Font = Font
-  { fHandle :: !(IORef (Ptr ()))
-  , fBytes :: !BS.ByteString
-  , fScale :: !(IORef Float)
-  , fFHeight :: !(IORef Float)
-  , fDescent :: !(IORef Float)
-  , fSpaceAdvDev :: !(IORef Float)
-  -- ^ The space glyph's advance at the current raster size, in device
-  -- pixels.
+  { fBytes :: !BS.ByteString
+  , fState :: !(IORef FontState)
   , fGlyphs :: !(IORef (IntMap GlyphDev))
   -- ^ Rasterized glyphs by code point, valid for the current handle and
   -- raster size only.
@@ -134,22 +141,9 @@ peekGlyph p = do
 -- caller may release them.
 newFont :: ByteString -> IO Font
 newFont bytes = do
-  handle <- newIORef nullPtr
-  scaleRef <- newIORef 0
-  fh <- newIORef 0
-  ds <- newIORef 0
-  sa <- newIORef 0
+  st <- newIORef (FontState nullPtr 0 0 0 0 0)
   glyphs <- newIORef IM.empty
-  let f =
-        Font
-          { fHandle = handle
-          , fBytes = bytes
-          , fScale = scaleRef
-          , fFHeight = fh
-          , fDescent = ds
-          , fSpaceAdvDev = sa
-          , fGlyphs = glyphs
-          }
+  let f = Font {fBytes = bytes, fState = st, fGlyphs = glyphs}
   fontSetScale f 1
   pure f
 
@@ -158,53 +152,38 @@ newFont bytes = do
 -- a fresh font and atlas, and the Haskell-side glyph cache with them.
 fontSetScale :: Font -> Float -> IO ()
 fontSetScale f scale = do
-  let scale' = if scale > 0 && not (isNaN scale || isInfinite scale) then scale else 1
-  old <- readIORef (fScale f)
-  if scale' == old
-    then pure ()
-    else do
-      oldHandle <- readIORef (fHandle f)
-      if oldHandle /= nullPtr
-        then c_free oldHandle
-        else pure ()
-      let sizeD = max 8 (round (lineHeight * scale') :: Int)
-      h <-
-        BSU.unsafeUseAsCStringLen (fBytes f) $ \(p, len) ->
-          c_init (castPtr p) (fromIntegral len) (fromIntegral sizeD) (fromIntegral atlasWidth) (fromIntegral atlasHeight)
-      if h == nullPtr
-        then fail "chibi-ui: font failed to load"
-        else do
-          writeIORef (fHandle f) h
-          allocaBytes 12 $ \m -> do
-            c_metrics h m (plusPtr m 4) (plusPtr m 8)
-            fh <- peekByteOff m 0 :: IO Float
-            ds <- peekByteOff m 4 :: IO Float
-            sa <- peekByteOff m 8 :: IO Float
-            writeIORef (fFHeight f) fh
-            writeIORef (fDescent f) ds
-            -- The space advance in device pixels, precomputed: a space
-            -- has no glyph box, so its width comes from the font's hmtx
-            -- entry scaled by the raster size.
-            writeIORef (fSpaceAdvDev f) (if fh > 0 then sa * fromIntegral sizeD / fh else 0)
-          writeIORef (fGlyphs f) IM.empty
-          writeIORef (fScale f) scale'
+  let scale' = if validScale scale then scale else 1
+  old <- readIORef (fState f)
+  when (scale' /= fsScale old) $ do
+    when (fsHandle old /= nullPtr) (c_free (fsHandle old))
+    let sizeD = max 8 (round (lineHeight * scale') :: Int)
+    h <-
+      BSU.unsafeUseAsCStringLen (fBytes f) $ \(p, len) ->
+        c_init (castPtr p) (fromIntegral len) (fromIntegral sizeD) (fromIntegral atlasWidth) (fromIntegral atlasHeight)
+    when (h == nullPtr) $ fail "chibi-ui: font failed to load"
+    (fh, ds, sa) <- allocaBytes 12 $ \m -> do
+      c_metrics h m (plusPtr m 4) (plusPtr m 8)
+      (,,) <$> (peekByteOff m 0 :: IO Float) <*> (peekByteOff m 4 :: IO Float) <*> (peekByteOff m 8 :: IO Float)
+    writeIORef (fState f)
+      FontState
+        { fsHandle = h
+        , fsScale = scale'
+        , fsSize = sizeD
+        , fsFHeight = fh
+        , fsDescent = ds
+          -- The space advance in device pixels, precomputed: a space has
+          -- no glyph box, so its width comes from the font's hmtx entry
+          -- scaled by the raster size.
+        , fsSpaceAdv = if fh > 0 then sa * fromIntegral sizeD / fh else 0
+        }
+    writeIORef (fGlyphs f) IM.empty
 
 -- | Free the C font. The record is dead afterwards.
 fontFree :: Font -> IO ()
 fontFree f = do
-  h <- readIORef (fHandle f)
-  if h /= nullPtr then c_free h else pure ()
-  writeIORef (fHandle f) nullPtr
-
--- | The device-pixel raster size at the current scale.
-currentSize :: Font -> IO Word32
-currentSize f = do
-  scale <- readScale f
-  pure (fromIntegral (max 8 (round (lineHeight * scale) :: Int)))
-
--- | The space advance at the current raster size, in device pixels.
-spaceAdvDev :: Font -> IO Float
-spaceAdvDev f = readIORef (fSpaceAdvDev f)
+  st <- readIORef (fState f)
+  when (fsHandle st /= nullPtr) (c_free (fsHandle st))
+  writeIORef (fState f) st {fsHandle = nullPtr}
 
 -- | The width of one line of text, in logical pixels: the sum of glyph
 -- advances. Newlines advance nothing. Measuring rasterizes the glyphs, so
@@ -213,10 +192,11 @@ spaceAdvDev f = readIORef (fSpaceAdvDev f)
 -- character.
 fontMeasure :: Font -> Text -> IO Float
 fontMeasure f t = do
-  scale <- readScale f
+  st <- readIORef (fState f)
   glyphs <- readIORef (fGlyphs f)
-  sa <- spaceAdvDev f
-  let end = TU.lengthWord8 t
+  let scale = fsScale st
+      sa = fsSpaceAdv st
+      end = TU.lengthWord8 t
       go !ms !acc !i
         | i >= end = pure acc
         | otherwise = case charAt t i of
@@ -257,17 +237,17 @@ charAt t !i = case TU.iter t i of
 -- glyph with the updated map.
 rasterizeInto :: IntMap GlyphDev -> Font -> Int -> IO (IntMap GlyphDev, GlyphDev)
 rasterizeInto glyphs f cp = do
-  h <- readIORef (fHandle f)
+  st <- readIORef (fState f)
   g <-
-    if h == nullPtr
+    if fsHandle st == nullPtr
       then pure missGlyph
-      else do
-        sizeD <- currentSize f
+      else
         allocaBytes glyphBytes $ \p -> do
-          c_glyph h (fromIntegral cp) sizeD p
+          c_glyph (fsHandle st) (fromIntegral cp) (fromIntegral (fsSize st)) p
           peekGlyph p
-  g `seq` writeIORef (fGlyphs f) (IM.insert cp g glyphs)
-  pure (IM.insert cp g glyphs, g)
+  let !glyphs' = IM.insert cp g glyphs
+  writeIORef (fGlyphs f) glyphs'
+  pure (glyphs', g)
 
 -- | Draw one line of text as glyph quads into the draw arena, with the
 -- line box's top-left at the logical pen. Baseline math follows RFont's:
@@ -285,13 +265,9 @@ rasterizeInto glyphs f cp = do
 -- fractionally, so spacing stays true to 'fontMeasure'.
 fontDrawText :: Font -> DrawArena -> Float -> Float -> Color -> Text -> IO ()
 fontDrawText f arena penX penY col t = do
-  scale <- readScale f
-  h <- readIORef (fHandle f)
+  FontState {fsHandle = h, fsScale = scale, fsSize = sizeD, fsFHeight = fh, fsDescent = ds, fsSpaceAdv = sa} <-
+    readIORef (fState f)
   when (h /= nullPtr) $ do
-    sizeD <- currentSize f
-    fh <- readIORef (fFHeight f)
-    ds <- readIORef (fDescent f)
-    sa <- spaceAdvDev f
     glyphs <- readIORef (fGlyphs f)
     let baseline =
           if fh > 0
@@ -333,16 +309,11 @@ fontDrawText f arena penX penY col t = do
                           go ms (pen + gdAdvance g) (i + d)
     go glyphs (penX * scale) 0
 
-readScale :: Font -> IO Float
-readScale f = do
-  scale <- readIORef (fScale f)
-  pure (if scale > 0 then scale else 1)
-
 -- | The atlas coverage bytes. The pointer is stable for the font's
 -- lifetime; read it only while the dirty flag says new glyphs exist.
 fontAtlasPixels :: Font -> IO (Ptr Word8)
 fontAtlasPixels f = do
-  h <- readIORef (fHandle f)
+  h <- fsHandle <$> readIORef (fState f)
   if h /= nullPtr then c_atlasPixels h else pure nullPtr
 
 -- | The atlas dimensions, in texels.
@@ -353,7 +324,8 @@ fontAtlasSize _ = pure (atlasWidth, atlasHeight)
 -- backend should re-upload the atlas.
 fontTakeDirty :: Font -> IO Bool
 fontTakeDirty f = do
-  h <- readIORef (fHandle f)
+  h <- fsHandle <$> readIORef (fState f)
   if h /= nullPtr
+
     then (/= 0) <$> c_takeDirty h
     else pure False

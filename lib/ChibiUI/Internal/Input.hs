@@ -12,7 +12,7 @@ module ChibiUI.Internal.Input
   , noModifiers
   , modifiersFromBits
   , modPrimary
-  , shiftAtMost
+  , onMac
   , Input (..)
   , Pressable (..)
   , emptyInput
@@ -34,10 +34,6 @@ module ChibiUI.Internal.Input
   , buttonsDelete
   , applyMouseButton
   , applyPointerLeave
-  , inputKeysFromList
-  , inputKeysNull
-  , inputKeysElem
-  , foldInputKeys
   , UiCursorKind (..)
   , cursorFallback
   , syncCursorKind
@@ -102,10 +98,6 @@ modifiersFromBits m shift ctrl alt super = Modifiers (has shift) (has ctrl) (has
 modPrimary :: Modifiers -> Bool
 modPrimary = if onMac then modSuper else modCtrl
 
--- | Whether no modifier other than Shift is held.
-shiftAtMost :: Modifiers -> Bool
-shiftAtMost m = not (modCtrl m || modAlt m || modSuper m)
-
 -- | Whether this is macOS, where Command is the command modifier.
 onMac :: Bool
 onMac = os == "darwin"
@@ -142,11 +134,11 @@ class Pressable a where
 
 instance Pressable Key where
   {-# INLINE pressedIn #-}
-  pressedIn k = inputKeysElem k . inputKeys
+  pressedIn k = elem k . inputKeys
   {-# INLINE releasedIn #-}
-  releasedIn k = inputKeysElem k . inputKeysReleased
+  releasedIn k = elem k . inputKeysReleased
   {-# INLINE heldIn #-}
-  heldIn k = inputKeysElem k . inputKeysHeld
+  heldIn k = elem k . inputKeysHeld
 
 instance Pressable MouseButton where
   {-# INLINE pressedIn #-}
@@ -356,26 +348,6 @@ applyPointerLeave inp = inp {inputMousePos = offWindow}
 -- | A point far outside any window.
 offWindow :: V2
 offWindow = V2 (-1e6) (-1e6)
-
--- | Copy a list of key events into the frame's key list, preserving order.
-{-# INLINE inputKeysFromList #-}
-inputKeysFromList :: [Key] -> [Key]
-inputKeysFromList = id
-
--- | Whether the frame contains no key events.
-{-# INLINE inputKeysNull #-}
-inputKeysNull :: [Key] -> Bool
-inputKeysNull = null
-
--- | Whether a key occurs in the frame's events.
-{-# INLINE inputKeysElem #-}
-inputKeysElem :: Key -> [Key] -> Bool
-inputKeysElem = elem
-
--- | Strict left fold over keys in event order.
-{-# INLINE foldInputKeys #-}
-foldInputKeys :: (a -> Key -> a) -> a -> [Key] -> a
-foldInputKeys = foldl'
 
 -- | Compare interaction fields, including buttons, keys, scroll and window
 -- size. Pointer motion and elapsed time are ignored.
