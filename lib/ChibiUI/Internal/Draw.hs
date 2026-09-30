@@ -231,32 +231,37 @@ popClip a = do
 {-# INLINE emitQuadUV #-}
 emitQuadUV :: DrawArena -> Int -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO ()
 emitQuadUV a !tex !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
-  clip <- readIORef (daLastClip a)
-  let !(cx0, cy0, cx1, cy1) = clipEdges clip
+  Rect cx0 cy0 cw ch <- readIORef (daLastClip a)
+  let !cx1 = cx0 + cw
+      !cy1 = cy0 + ch
   if x1 <= x0 || y1 <= y0 || cx1 <= cx0 || cy1 <= cy0
       || x0 >= cx1 || x1 <= cx0 || y0 >= cy1 || y1 <= cy0
     then pure ()
-    else do
-      -- Cut the quad to the clip, sliding the UVs with the edges.
-      let !nx0 = max x0 cx0
-          !ny0 = max y0 cy0
-          !nx1 = min x1 cx1
-          !ny1 = min y1 cy1
-          !w = x1 - x0
-          !h = y1 - y0
-          ux x = if w > 0 then u0 + (u1 - u0) * ((x - x0) / w) else u0
-          uy y = if h > 0 then v0 + (v1 - v0) * ((y - y0) / h) else v0
-      n <- readURef (daVertexCount a)
-      growVertices a ((n + 4) * vertexSize)
-      buf <- readIORef (daVertexPtr a)
-      writeQuadVertices buf n nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
-      writeURef (daVertexCount a) (n + 4)
-      batchQuad a tex (n `quot` 4)
+    else
+      if x0 >= cx0 && y0 >= cy0 && x1 <= cx1 && y1 <= cy1
+        -- Inside the clip, the usual case: nothing to cut.
+        then appendQuad a tex x0 y0 x1 y1 col u0 v0 u1 v1
+        else do
+          -- Cut the quad to the clip, sliding the UVs with the edges.
+          let !nx0 = max x0 cx0
+              !ny0 = max y0 cy0
+              !nx1 = min x1 cx1
+              !ny1 = min y1 cy1
+              ux x = u0 + (u1 - u0) * ((x - x0) / (x1 - x0))
+              uy y = v0 + (v1 - v0) * ((y - y0) / (y1 - y0))
+          appendQuad a tex nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
 
--- | Corners of a rect as @x0, y0, x1, y1@.
-{-# INLINE clipEdges #-}
-clipEdges :: Rect -> (Float, Float, Float, Float)
-clipEdges (Rect x y w h) = (x, y, x + w, y + h)
+-- | Write a quad after the arena's last, growing the buffer when needed,
+-- and batch it.
+{-# INLINE appendQuad #-}
+appendQuad :: DrawArena -> Int -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO ()
+appendQuad a !tex !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
+  n <- readURef (daVertexCount a)
+  growVertices a ((n + 4) * vertexSize)
+  buf <- readIORef (daVertexPtr a)
+  writeQuadVertices buf n x0 y0 x1 y1 col u0 v0 u1 v1
+  writeURef (daVertexCount a) (n + 4)
+  batchQuads a tex (n `quot` 4) 1
 
 -- | A solid rectangle: an atlas quad whose UV of -1 reads as full coverage.
 {-# INLINE fillRect #-}
@@ -275,24 +280,25 @@ strokeRect a (Rect x y w h) bw c
       fillRect a (Rect x (y + t) t (h - t - b)) c
       fillRect a (Rect (x + w - t) (y + t) t (h - t - b)) c
 
--- | Extend the open batch with quad @q@ when its texture continues it; else
--- close the open batch into the command list and open a fresh one.
--- Continuing a batch only bumps a counter, so the common run of quads
--- under one texture allocates nothing per quad.
-{-# INLINE batchQuad #-}
-batchQuad :: DrawArena -> Int -> Int -> IO ()
-batchQuad a !texture !q = do
+-- | Extend the open batch with the @k@ quads from @q@ when their texture
+-- continues it; else close the open batch into the command list and open
+-- a fresh one. The quads always follow the open batch's, so continuing it
+-- only bumps a counter, and the common run under one texture allocates
+-- nothing.
+{-# INLINE batchQuads #-}
+batchQuads :: DrawArena -> Int -> Int -> Int -> IO ()
+batchQuads a !texture !q !k = do
   openTex <- readIORef (daBatchTexture a)
   openCount <- readURef (daBatchCount a)
   if openCount > 0 && openTex == texture
-    then writeURef (daBatchCount a) (openCount + 1)
+    then writeURef (daBatchCount a) (openCount + k)
     else do
       when (openCount > 0) $ do
         openStart <- readURef (daBatchStart a)
         modifyIORef' (daCommands a) (DrawCmd openTex (fromIntegral openStart) (fromIntegral openCount) :)
       writeIORef (daBatchTexture a) texture
       writeURef (daBatchStart a) q
-      writeURef (daBatchCount a) 1
+      writeURef (daBatchCount a) k
 
 -- | Write four vertices in the C renderer's 32-byte layout: position, RGBA
 -- as four floats, UV. Colour channels come from the packed @0xRRGGBBAA@ word.

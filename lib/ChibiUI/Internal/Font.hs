@@ -62,13 +62,14 @@ atlasWidth, atlasHeight :: Int
 atlasWidth = 512
 atlasHeight = 512
 
--- | One rasterized glyph, in device pixels at the current size. All fields
--- are unboxed into the constructor, so a cache hit allocates nothing.
+-- | One rasterized glyph, in device pixels at the current size, with its
+-- atlas rect as normalized UVs. All fields are unboxed into the
+-- constructor, so a cache hit allocates nothing.
 data GlyphDev = GlyphDev
-  { gdAX :: {-# UNPACK #-} !Int
-  , gdAY :: {-# UNPACK #-} !Int
-  , gdAX2 :: {-# UNPACK #-} !Int
-  , gdAY2 :: {-# UNPACK #-} !Int
+  { gdU0 :: {-# UNPACK #-} !Float
+  , gdV0 :: {-# UNPACK #-} !Float
+  , gdU1 :: {-# UNPACK #-} !Float
+  , gdV1 :: {-# UNPACK #-} !Float
   , gdW :: {-# UNPACK #-} !Float
   , gdH :: {-# UNPACK #-} !Float
   , gdX1 :: {-# UNPACK #-} !Float
@@ -143,7 +144,9 @@ peekGlyph p = do
   x1 <- fl 24
   y1 <- fl 28
   adv <- fl 32
-  pure GlyphDev {gdAX = ax, gdAY = ay, gdAX2 = ax2, gdAY2 = ay2, gdW = w, gdH = h, gdX1 = x1, gdY1 = y1, gdAdvance = adv}
+  let u x = fromIntegral (x :: Int) / fromIntegral atlasWidth
+      v y = fromIntegral (y :: Int) / fromIntegral atlasHeight
+  pure GlyphDev {gdU0 = u ax, gdV0 = v ay, gdU1 = u ax2, gdV1 = v ay2, gdW = w, gdH = h, gdX1 = x1, gdY1 = y1, gdAdvance = adv}
 
 -- | Load the font at scale 1. The bytes are copied into C memory, so the
 -- caller may release them.
@@ -286,10 +289,8 @@ fontDrawText f arena penX penY col t = do
             else fromIntegral sizeD
         baseY = fromIntegral (roundHalfUp (penY * scale + baseline))
         invScale = recip scale
-        atlasW = fromIntegral atlasWidth :: Float
-        atlasH = fromIntegral atlasHeight :: Float
         end = TU.lengthWord8 t
-        go !pen !i
+    let go !pen !i
           | i >= end = pure ()
           | otherwise = case charAt t i of
               (# cp, d #)
@@ -299,18 +300,16 @@ fontDrawText f arena penX penY col t = do
                     g <- glyph st cp
                     when (gdW g > 0 && gdH g > 0) $
                       let px = fromIntegral (roundHalfUp pen)
-                       in emitQuadUV
-                            arena
-                            texAtlas
+                       in emitQuadUV arena texAtlas
                             ((px + gdX1 g) * invScale)
                             ((baseY + gdY1 g) * invScale)
                             ((px + gdX1 g + gdW g) * invScale)
                             ((baseY + gdY1 g + gdH g) * invScale)
                             col
-                            (fromIntegral (gdAX g) / atlasW)
-                            (fromIntegral (gdAY g) / atlasH)
-                            (fromIntegral (gdAX2 g) / atlasW)
-                            (fromIntegral (gdAY2 g) / atlasH)
+                            (gdU0 g)
+                            (gdV0 g)
+                            (gdU1 g)
+                            (gdV1 g)
                     go (pen + max 0 (gdAdvance g)) (i + d)
     go (penX * scale) 0
 
