@@ -44,13 +44,11 @@ demo = do
     when two (setUiScale 2)
     when auto (setUiScale 0)
 
-  -- Buttons and state.
+  -- Buttons and state. Inside a row, children flow left to right.
   row $ do
     minus <- button "-"
     when minus (modify (\m -> m {count = count m - 1}))
-    sameLine
     label . T.pack . show =<< gets count
-    sameLine
     plus <- button "+"
     when plus (modify (\m -> m {count = count m + 1}))
 
@@ -60,14 +58,12 @@ demo = do
   row $ do
     alignTextToFrame
     label "name"
-    sameLine
     nextWidth 180
     value <- textInput =<< gets name
     modify (\m -> m {name = value})
   row $ do
     alignTextToFrame
     label "temp"
-    sameLine
     value <- floatInput =<< gets temperature
     modify (\m -> m {temperature = value})
   labelDim "Drag to select; double-click a word; right-click to edit."
@@ -77,7 +73,6 @@ demo = do
   row $ do
     alignTextToFrame
     label "frequency"
-    sameLine
     nextWidth 180
     started <- gets volume
     v <- slider started 0 1

@@ -280,8 +280,15 @@ textSize t = do
   pure (Size w lineHeight)
 
 -- | Keep the next widget on the current line, to the right of the last one
--- placed. Only the next item stays on that line; a 'row' keeps all its
--- children horizontal without repeated calls.
+-- placed. For gluing a pair together, or for putting a widget that a helper
+-- places onto the current line; a run of widgets belongs in a 'row', whose
+-- children flow left to right without repeated calls ('sameLine' inside a
+-- 'row' is a no-op).
+--
+-- The command is one-shot and binds to the next widget /placed/, not the
+-- next statement: @sameLine >> when p (label x)@ with @p@ false leaves the
+-- line open for whichever widget is placed later. Guard the 'sameLine'
+-- itself, or use 'row', when widgets are conditional.
 sameLine :: ChibiUI model ()
 sameLine = layoutCommand Layout.SameLine
 
@@ -289,7 +296,9 @@ sameLine = layoutCommand Layout.SameLine
 newline :: ChibiUI model ()
 newline = layoutCommand Layout.Newline
 
--- | Lay out a horizontal group. The group occupies one item in its parent.
+-- | Lay out a horizontal group: its children flow left to right, and the
+-- group occupies one item in its parent. Preferred over repeated 'sameLine'
+-- for any run of two or more widgets.
 row :: ChibiUI model a -> ChibiUI model a
 row = group True
 

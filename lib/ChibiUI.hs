@@ -76,12 +76,13 @@ module ChibiUI
 
     -- * Layout
 
-    -- | The cursor steps down after every widget. 'sameLine' keeps the
-    -- next widget on the current line; 'newline' steps down explicitly;
-    -- 'row' and 'column' scope a horizontal or vertical run; 'indent'
-    -- shifts a body's lines; 'nextWidth' and 'nextHeight' size the next
-    -- widget; 'space' steps the cursor; 'scrollColumn' clips and scrolls
-    -- its body to the window's bottom.
+    -- | The cursor steps down after every widget. 'row' and 'column' scope a
+    -- horizontal or vertical run; inside a 'row' children flow left to right
+    -- on their own. 'sameLine' is the one-shot escape hatch for a pair, or
+    -- for putting a helper-placed widget on the current line; 'newline'
+    -- steps down explicitly; 'indent' shifts a body's lines; 'nextWidth'
+    -- and 'nextHeight' size the next widget; 'space' steps the cursor;
+    -- 'scrollColumn' clips and scrolls its body to the window's bottom.
   , sameLine
   , newline
   , row
