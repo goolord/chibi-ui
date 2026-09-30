@@ -6,6 +6,7 @@ module ChibiUI.Internal.Widgets
   , selectableText
   , button
   , checkbox
+  , radio
   , treeNode
   , textInput
   , textArea
@@ -19,7 +20,7 @@ module ChibiUI.Internal.Widgets
   , separator
   ) where
 
-import Control.Monad (foldM, forM, forM_, mfilter, when, void)
+import Control.Monad (foldM, forM, forM_, mfilter, msum, when, void)
 import Data.List (transpose)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
@@ -76,18 +77,37 @@ button t = do
 -- it is focused, to flip it; returns the value it now holds.
 checkbox :: Text -> Bool -> ChibiUI model Bool
 checkbox t value = do
+  let flipped clicked = clicked /= value
+  flipped <$> markBox t flipped
+
+-- | One box per option, in a row: click one, or press Enter/Space while it
+-- is focused, to choose it. Returns the value now chosen.
+radio :: Eq a => [(Text, a)] -> a -> ChibiUI model a
+radio options value = row $ do
+  clicks <- forM options $ \(t, x) -> do
+    clicked <- markBox t (const (x == value))
+    pure (if clicked then Just x else Nothing)
+  case msum clicks of
+    -- Options before the chosen one drew already: show them next frame.
+    Just x | x /= value -> x <$ requestFrame
+    _ -> pure value
+
+-- | A box with a caption after it, filled while @marked@ says, given
+-- whether it was clicked this frame. 'True' on click, or Enter/Space
+-- while focused.
+markBox :: Text -> (Bool -> Bool) -> ChibiUI model Bool
+markBox t marked = do
   (_, r, i) <- interactive clickable $ do
     Size w h <- textSize t
     pure (Size (h + widgetPad + w) (h + widgetPad * 2))
   th <- theme
-  let checked = if iClicked i then not value else value
-      box = Rect (rectX r) (rectY r + widgetPad) lineHeight lineHeight
+  let box = Rect (rectX r) (rectY r + widgetPad) lineHeight lineHeight
       caption = lineHeight + widgetPad
   fillRectUI box (surfaceFor th i)
   frameBorder th box (iFocused i)
-  when checked (fillRectUI (rectInflate (-4) box) (themeAccent th))
+  when (marked (iClicked i)) (fillRectUI (rectInflate (-4) box) (themeAccent th))
   drawTextIn (r {rectX = rectX r + caption, rectW = max 0 (rectW r - caption)}) t (themeText th)
-  pure checked
+  pure (iClicked i)
 
 -- | The surface under a widget: pressed, hovered, or at rest.
 surfaceFor :: Theme -> Interaction -> Color

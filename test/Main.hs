@@ -6,7 +6,7 @@ module Main (main) where
 
 import Control.Monad (filterM)
 import Data.IORef
-import Data.List (sortOn)
+import Data.List (nub, sortOn)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable (peekByteOff)
@@ -31,6 +31,7 @@ main = do
   testIntInput
   testSlider
   testCheckbox
+  testRadio
   testTable
   testRaggedTable
   testPlotLines
@@ -469,6 +470,31 @@ testCheckbox = do
   spaced <- frame ctx (keys [KeySpace]) view
   idle <- frame ctx id view
   assert "checkbox: click or Space did not flip it" (not pressed && clicked && not spaced && not idle)
+
+-- Clicking an option chooses it; the options lie left to right.
+testRadio :: IO ()
+testRadio = do
+  ctx <- newTestContext
+  ref <- newIORef 'a'
+  let view = do
+        v <- radio [("a", 'a'), ("b", 'b'), ("c", 'c')] =<< liftIO (readIORef ref)
+        liftIO (writeIORef ref v)
+        pure v
+  _ <- frame ctx id view
+  rs <- readRects ctx
+  assert ("radio: expected three options in a row: " ++ show rs)
+    (length rs == 3 && length (nub (map rectY rs)) == 1)
+  chosen <- clickIn ctx (last rs) view
+  kept <- frame ctx id view
+  assert "radio: click did not choose the option" (chosen == 'c' && kept == 'c')
+
+-- | Press and release the left button just inside a rect: the release
+-- frame's result.
+clickIn :: Context model -> Rect -> ChibiUI model a -> IO a
+clickIn ctx r view = do
+  let here = at (rectX r + 2) (rectY r + 2)
+  _ <- frame ctx (here . pressLeft) view
+  frame ctx (here . releaseLeft) view
 
 -- A wave draws more than a flat line, which draws more than nothing; every
 -- series stays inside the plot's rect.
