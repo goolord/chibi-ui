@@ -13,6 +13,7 @@ module ChibiUI.Internal.Widgets
   , intInput
   , floatInput
   , slider
+  , progressBar
   , image
   , plotLines
   , table
@@ -283,6 +284,16 @@ slider value lo hi = do
   fillRectUI (Rect (thumbX - tw / 2) (cy - thumbH / 2) tw thumbH) (themeText th)
   focusRing th r (iFocused i)
   pure moved
+
+-- | A bar filled @fraction@ of the way across, for 0 to 1: at most 160
+-- wide, like 'slider'.
+progressBar :: Float -> ChibiUI model ()
+progressBar fraction = do
+  (_, r) <- widgetRect (fieldSize 160)
+  th <- theme
+  fillRectUI r (themeSurface th)
+  fillRectUI (r {rectW = rectW r * clamp01 fraction}) (themeAccent th)
+  strokeRectUI r 1 (themeBorder th)
 
 data FieldMode = SingleLine | MultiLine | ReadOnly deriving (Eq)
 

@@ -82,6 +82,8 @@ demo = do
     started <- gets volume
     v <- slider started 0 1
     modify (\m -> m {volume = v})
+    nextWidth 80
+    progressBar v
   shown <- checkbox "show plot" =<< gets showPlot
   modify (\m -> m {showPlot = shown})
   vol <- gets volume

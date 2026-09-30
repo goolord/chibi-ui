@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `progressBar fraction`: a bar filled that far across.
+
 - Added `radio options value`: a row of boxes, one per option, that
   chooses the one clicked.
 
