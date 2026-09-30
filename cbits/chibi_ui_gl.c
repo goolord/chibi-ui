@@ -307,8 +307,12 @@ chibi_ui_gl* chibi_ui_gl_create(void) {
 
   gl->GenTextures(1, &r->atlas);
   gl->BindTexture(GL_TEXTURE_2D, r->atlas);
-  gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  /* Glyph quads are snapped to whole device pixels, so aligned sampling
+   * hits texel centers exactly; linear keeps any fractional placement
+   * smooth instead of blocky (the packer pads glyphs by a texel so
+   * filtering cannot bleed neighbours). */
+  gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   gl->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 

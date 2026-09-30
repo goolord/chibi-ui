@@ -390,8 +390,8 @@ testTable = do
   _ <- frame ctx id view
   rs <- readRects ctx
   r <- bigRect rs
-  -- Click the second data row: header (13 + 2*3) plus two rows down.
-  let rowH = 13 + 2 * 3
+  -- Click the second data row: header (16 + 2*3) plus two rows down.
+  let rowH = 16 + 2 * 3
       cx = rectX r + 1
       cy = rectY r + rowH * 2 + 1
   _ <- frame ctx (at cx cy . pressLeft) view
@@ -436,7 +436,7 @@ testLayoutCursor = do
       unless (rectX b >= rectX a + rectW a) (fail "layout: sameLine overlapped the first label")
     _ -> fail "layout: bad first line"
   case below of
-    [c] -> unless (rectY c >= pad + 13) (fail "layout: newline did not step down")
+    [c] -> unless (rectY c >= pad + 16) (fail "layout: newline did not step down")
     _ -> fail "layout: expected one label on the second line"
 
 testScroll :: IO ()
@@ -455,7 +455,7 @@ testScroll = do
   let r = foldr1 (\a b -> if rectH a >= rectH b then a else b) rs
       cx = rectX r + rectW r / 2
       cy = rectY r + 10
-      step = 3 * 13 -- three line heights
+      step = 3 * 16 -- three line heights
   _ <- frame ctx (\i -> (at cx cy i) {inputScroll = V2 0 1}) view
   top1 <- childTops
   unless (top0 == rectY r) (fail ("scroll: first child not at region top: " ++ show top0))
@@ -817,9 +817,9 @@ testClippedInteraction = do
   _ <- frame ctx (at (rectX f + 1) (rectY f + 1) . pressLeft) view
   ((_, value, _), _) <- frame ctx (typeText "!" . releaseLeft) view
   assert "scroll: invisible field took focus" (value == "hidden")
-  let tableRects = [r | r <- rs, rectH r == 38]
+  let tableRects = [r | r <- rs, rectH r == 44]
   t <- bigRect tableRects
-  ((_, _, selected), _) <- frame ctx (at (rectX t + 1) (rectY t + 20) . pressLeft) view
+  ((_, _, selected), _) <- frame ctx (at (rectX t + 1) (rectY t + 30) . pressLeft) view
   assert "scroll: invisible table row selected" (selected == Nothing)
 
 testConstrainedPrimitives :: IO ()
@@ -1052,10 +1052,13 @@ testTextAlignment = do
   top <- glyphY AlignTop
   middle <- glyphY AlignMiddle
   bottom <- glyphY AlignBottom
-  assert "alignment: top/middle/bottom offsets incorrect" (abs (middle - top - 20) < 0.01 && abs (bottom - top - 40) < 0.01)
+  -- Snapping rounds each line's baseline to whole device pixels, so the
+  -- offsets hold to within a pixel rather than exactly.
+  assert "alignment: top/middle/bottom offsets incorrect"
+    (abs (middle - top - 18.5) <= 1 && abs (bottom - top - 37) <= 1)
   _ <- frame ctx id (row (alignTextToFrame >> label "caption" >> textInput "value"))
   rs <- readRects ctx
-  assert "alignment: caption does not match field height" (length rs == 2 && all ((== 23) . rectH) rs)
+  assert "alignment: caption does not match field height" (length rs == 2 && all ((== 26) . rectH) rs)
 
 testDpiGeometry :: IO ()
 testDpiGeometry = do
@@ -1126,7 +1129,7 @@ testTreeInteraction = do
   assert "tree: expansion changed sibling identity or failed to reserve height"
     (closedId == openId && rectY openRect > rectY closedRect && rectX openRect == rectX closedRect)
   assert "tree: child is not indented below the header"
-    (any (\r -> rectH r == 13 && rectX r > 10 && rectY r > 35 && rectY r + rectH r < rectY openRect) rs)
+    (any (\r -> rectH r == 16 && rectX r > 10 && rectY r > 35 && rectY r + rectH r < rectY openRect) rs)
   persisted <- step id
   left <- step (keys [KeyLeft])
   right <- step (keys [KeyRight])

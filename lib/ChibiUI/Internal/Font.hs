@@ -48,9 +48,10 @@ embeddedFont :: ByteString
 embeddedFont = $(embedFileRelative "data/inter.ttf")
 
 -- | The line height, in logical pixels: the RFont raster size is this
--- times the UI scale, and every single-line widget sizes by it.
+-- times the UI scale, and every single-line widget sizes by it. 16
+-- matches nano-ui's default text size.
 lineHeight :: Float
-lineHeight = 13
+lineHeight = 16
 
 -- | Atlas dimensions, in texels. 512x512 of coverage holds thousands of
 -- glyphs at UI sizes.
@@ -275,6 +276,13 @@ rasterizeInto glyphs f cp = do
 -- read as spaces; newlines advance nothing. The walk and the cached-glyph
 -- lookups are unboxed, so a steady-state draw allocates nothing per
 -- character.
+--
+-- Glyphs are rasterized once at whole device pixels, so their quads must
+-- land back on whole device pixels: a fractional pen makes nearest-texel
+-- sampling drop and duplicate coverage columns (blocky, uneven strokes).
+-- The baseline is snapped per line and each glyph's pen per glyph, in
+-- device space, the way terminals place glyphs; advances still accumulate
+-- fractionally, so spacing stays true to 'fontMeasure'.
 fontDrawText :: Font -> DrawArena -> Float -> Float -> Color -> Text -> IO ()
 fontDrawText f arena penX penY col t = do
   scale <- readScale f
@@ -289,7 +297,7 @@ fontDrawText f arena penX penY col t = do
           if fh > 0
             then fromIntegral sizeD * (fh + ds) / fh
             else fromIntegral sizeD
-        baseY = penY * scale + baseline
+        baseY = fromIntegral (round (penY * scale + baseline) :: Int)
         invScale = recip scale
         atlasW = fromIntegral atlasWidth :: Float
         atlasH = fromIntegral atlasHeight :: Float
@@ -310,11 +318,12 @@ fontDrawText f arena penX penY col t = do
                             else go ms' pen i -- retry as a hit, emitting it
                         else do
                           when (gdW g > 0 && gdH g > 0) $
-                            emitQuadUV
+                            let px = fromIntegral (round pen :: Int)
+                            in emitQuadUV
                               arena
-                              ((pen + gdX1 g) * invScale)
+                              ((px + gdX1 g) * invScale)
                               ((baseY + gdY1 g) * invScale)
-                              ((pen + gdX1 g + gdW g) * invScale)
+                              ((px + gdX1 g + gdW g) * invScale)
                               ((baseY + gdY1 g + gdH g) * invScale)
                               col
                               (fromIntegral (gdAX g) / atlasW)

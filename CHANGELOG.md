@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Text renders like nano-ui's instead of blocky, uneven strokes, and the
+  default font size is 16 px, up from 13 (nano-ui's default). Glyph quads
+  now land on whole device pixels: the rasterizer bakes each glyph once at
+  integer positions, but the pen placed quads fractionally (the baseline
+  always is fractional), so nearest-texel sampling dropped and duplicated
+  coverage columns. The baseline snaps per line and each glyph's pen per
+  glyph, in device space, the way terminals place glyphs; advances still
+  accumulate fractionally, so measurement and hit testing are unchanged.
+  The glyph atlas samples with linear filtering (nano-ui does the same),
+  with one texel of padding after every glyph and every atlas row so
+  filtering cannot bleed a neighbour glyph into an edge sample; quads that
+  land on whole pixels still sample exact texels, since pixel centers hit
+  texel centers. Glyph advances are rounded to device pixels instead of
+  truncated, so letter spacing no longer runs up to a pixel per character
+  tighter than the font designs. The atlas packer's larger cells still
+  hold the 256-glyph font subset many times over at the default size.
+
 - Cut steady-state allocation roughly in half again (demo view idle
   frames: about 200 KB to about 90 KB per frame; motion and typing frames
   by similar margins; minor GCs per run: 71 to 29), with identical

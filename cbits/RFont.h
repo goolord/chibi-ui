@@ -878,8 +878,11 @@ RFont_glyph RFont_font_add_codepoint_ex(RFont_renderer* renderer, RFont_font* fo
 		renderer->proc.bitmap_to_atlas(renderer->ctx, font->atlas, (u32)font->atlasWidth, (u32)font->atlasHeight, font->maxHeight, bitmap, glyph->w, glyph->h, &font->atlasX, &font->atlasY);
 
 	RFONT_FREE(bitmap);
-	glyph->x = (i32)(font->atlasX - glyph->w);
-	glyph->x2 = (i32)(font->atlasX);
+	/* CHIBI-UI PATCH: the chibi atlas packer advances x by w plus one
+	 * padding texel (see chibi_bitmap_to_atlas), so the glyph's rect is
+	 * [atlasX - w - 1, atlasX - 1); upstream's packer advances by w. */
+	glyph->x = (i32)(font->atlasX - glyph->w - 1.0f);
+	glyph->x2 = (i32)(font->atlasX - 1.0f);
 
 	glyph->y = (i32)(font->atlasY);
 	glyph->y2 = (i32)((font->atlasY) + glyph->h);
@@ -889,7 +892,10 @@ RFont_glyph RFont_font_add_codepoint_ex(RFont_renderer* renderer, RFont_font* fo
 	else
 		advanceX = RFONT_SHORT(font->src->info.data, font->src->info.hmtx + 4 * (i32)(font->numOfLongHorMetrics - 1));
 
-	glyph->advance = (u32)((float)advanceX * scale);
+	/* CHIBI-UI PATCH: round the advance instead of truncating it, which
+	 * loses up to a device pixel per character and sets text tighter than
+	 * the font designs. */
+	glyph->advance = (u32)((float)advanceX * scale + 0.5f);
 
 	return *glyph;
 }

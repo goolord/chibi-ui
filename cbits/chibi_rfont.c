@@ -50,8 +50,12 @@ static void chibi_free_atlas(void* ctx, RFont_texture atlas) {
 
 /* Pack one glyph's coverage rows at the packer position RFont keeps in
  * font->atlasX/atlasY: wrap to a new row of maxH when the glyph would
- * overflow the atlas width, copy the rows, then advance x. The glyph's
- * atlas rect comes back as [atlasX - w, atlasX) afterwards, matching. */
+ * overflow the atlas width, copy the rows, then advance x. Every glyph
+ * leaves one texel of padding after it (and every row below it) so linear
+ * atlas filtering cannot bleed a neighbour's edge into this glyph's
+ * outermost samples. The glyph's atlas rect comes back as
+ * [atlasX - w - 1, atlasX - 1) afterwards; RFont derives it from the
+ * amount x advances here, so the pad must stay 1. */
 static void chibi_bitmap_to_atlas(void* ctx, RFont_texture atlas, u32 aw, u32 ah, u32 maxH,
                                   u8* bitmap, float w, float h, float* x, float* y) {
     ChibiFont* f = (ChibiFont*)atlas;
@@ -59,9 +63,9 @@ static void chibi_bitmap_to_atlas(void* ctx, RFont_texture atlas, u32 aw, u32 ah
     int ih = (int)h;
     (void)ctx;
     (void)ah;
-    if (*x + w > (float)aw) {
+    if (*x + w + 1.0f > (float)aw) {
         *x = 0.0f;
-        *y += (float)maxH;
+        *y += (float)maxH + 1.0f;
     }
     if (bitmap != NULL && iw > 0 && ih > 0 && (int)*x + iw <= (int)aw &&
         (int)*y + ih <= (int)f->height) {
@@ -73,7 +77,7 @@ static void chibi_bitmap_to_atlas(void* ctx, RFont_texture atlas, u32 aw, u32 ah
         }
         f->dirty = 1;
     }
-    *x += w;
+    *x += w + 1.0f;
 }
 
 static void chibi_renderer_setup(void) {
