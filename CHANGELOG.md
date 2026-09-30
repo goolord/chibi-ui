@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `scrollColumn`'s scrollbar takes the mouse: drag the thumb to scroll,
+  or press the track to jump the thumb under the pointer and keep
+  dragging. The drag holds the pointer until release, even off the bar,
+  and the thumb brightens while hovered or dragged.
+
 - Flat geometry and text share one batch: flat quads sample the atlas
   with a UV of -1, which reads as full coverage, so the demo draws in 3
   calls instead of 36. The renderer keeps a fixed index buffer, and the

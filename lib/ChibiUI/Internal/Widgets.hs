@@ -647,15 +647,35 @@ table headers rows = do
 -- and height (the window's, less padding, at top level); 'nextWidth' and
 -- 'nextHeight' size it instead. The wheel scrolls every region under the
 -- pointer, and a thin scrollbar appears when the body is taller than the
--- region.
+-- region. Drag the scrollbar's thumb to scroll, or press the track to bring
+-- the thumb under the pointer and drag from there.
 scrollColumn :: ChibiUI model a -> ChibiUI model a
 scrollColumn body = do
   (wid, r) <- widgetRect ((\ls -> Size (Layout.remainingWidth ls) (Layout.remainingHeight ls)) <$> readLayout)
   th <- theme
   let barW = 4
+      trackR = Rect (rectX r + rectW r - barW) (rectY r) barW (rectH r)
   -- The extent is last frame's: the body has not run yet.
-  saved@(ScrollState scroll0 extent) <- fromMaybe (ScrollState 0 0) <$> widgetState scrollRegions wid
-  offset <- clampScroll extent (rectH r) . v2Y <$> wheelScroll r (V2 0 scroll0)
+  saved@(ScrollState scroll0 extent grab0) <- fromMaybe (ScrollState 0 0 0) <$> widgetState scrollRegions wid
+  wheeled <- clampScroll extent (rectH r) . v2Y <$> wheelScroll r (V2 0 scroll0)
+  -- The scrollbar takes the pointer where it showed last frame.
+  barHov <- if extent > rectH r then hovered trackR else pure False
+  inp <- getInput
+  let py = v2Y (inputMousePos inp)
+      (thumbY0, thumbH0) = scrollThumb r extent wheeled
+      pressed = barHov && pressedIn MouseLeft inp
+  when pressed (void (claimActive wid))
+  dragging <- (&& heldIn MouseLeft inp) <$> isActive wid
+  -- A press on the thumb holds it where it was pressed; one on the track
+  -- holds it by its middle, so the thumb jumps under the pointer.
+  let grab
+        | pressed = if py >= thumbY0 && py < thumbY0 + thumbH0 then py - thumbY0 else thumbH0 / 2
+        | otherwise = grab0
+      travel = rectH r - thumbH0
+      offset
+        | dragging && travel > 0 =
+            clampScroll extent (rectH r) ((py - grab - rectY r) / travel * (extent - rectH r))
+        | otherwise = wheeled
   let viewport = r {rectW = max 0 (rectW r - barW)}
       content = viewport {rectY = rectY r - offset}
   -- Clip to the region and shift the body up by the scroll.
@@ -664,18 +684,27 @@ scrollColumn body = do
     (withClip viewport body)
   let maxScroll = max 0 (contentH - rectH r)
       scroll1 = clampScroll contentH (rectH r) offset
-      next = ScrollState scroll1 contentH
+      next = ScrollState scroll1 contentH grab
   when (next /= saved) (setWidgetState scrollRegions wid (Just next))
   -- A shrunk body moved the clamp: settle the new offset on screen.
   when (scroll1 /= offset) requestFrame
-  -- A scrollbar when the body overflows.
+  -- A scrollbar when the body overflows, brighter while hovered or dragged.
   withClip r $ when (maxScroll > 0) $ do
-    let trackR = Rect (rectX r + rectW r - barW) (rectY r) barW (rectH r)
-        thumbH = min (rectH r) (max 8 (rectH r * rectH r / contentH))
-        thumbY = rectY r + (rectH r - thumbH) * (scroll1 / maxScroll)
+    let (thumbY, thumbH) = scrollThumb r contentH scroll1
     fillRectUI trackR (themeSurface th)
-    fillRectUI (Rect (rectX trackR) thumbY barW thumbH) (themeBorder th)
+    fillRectUI (Rect (rectX trackR) thumbY barW thumbH)
+      (if barHov || dragging then themeTextDim th else themeBorder th)
   pure a
+
+-- | The top and height of a region's scrollbar thumb for a body @content@
+-- tall, scrolled to @offset@.
+scrollThumb :: Rect -> Float -> Float -> (Float, Float)
+scrollThumb r content offset =
+  let view = rectH r
+      maxScroll = content - view
+      thumbH = min view (max 8 (view * view / max 1 content))
+      thumbY = rectY r + (view - thumbH) * (if maxScroll > 0 then offset / maxScroll else 0)
+   in (thumbY, thumbH)
 
 -- | How far one wheel step scrolls.
 scrollStep :: Float
