@@ -3,7 +3,6 @@ module ChibiUI.Internal.Menu
   ( contextMenu, openContextMenu, processPopup, paintPopup ) where
 
 import Control.Monad (forM_, when)
-import Data.IORef
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import ChibiUI.Internal.Context (Context (..), Popup (..), noWidget)
@@ -12,7 +11,6 @@ import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (lsLast)
 import ChibiUI.Internal.Monad
-import ChibiUI.Internal.RectTable (lookupRect, memberRect)
 import ChibiUI.Internal.Style
 import ChibiUI.Internal.Types
 
@@ -33,20 +31,18 @@ openContextMenu wid r items = do
   inp <- getInput
   hov <- hovered r
   focus <- readCtx ctxFocus
-  focusRect <- liftIO (readIORef (ctxRects ctx) >>= \t -> lookupRect t (slotOf focus))
+  focusRect <- lookupWidgetRect focus
   let within (Rect x y w h) = x >= rectX r && y >= rectY r
         && x + w <= rectX r + rectW r && y + h <= rectY r + rectH r
       focused = focus == wid || (focus /= noWidget && maybe False within focusRect)
-
-  let keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
+      keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
   when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $ do
     let position = if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp
         actions = [(t, enabled, runChibiUI ctx action) | (t, enabled, action) <- items]
         selected = firstOr (enabledIndices items)
-    liftIO $ do
-      writeIORef (ctxPopup ctx) (Just (Popup wid position actions selected (inputMousePos inp)))
-      writeIORef (ctxActive ctx) noWidget
-      writeIORef (ctxInputBlocked ctx) True
+    writeCtx ctxPopup (Just (Popup wid position actions selected (inputMousePos inp)))
+    writeCtx ctxActive noWidget
+    writeCtx ctxInputBlocked True
     requestFrame
 
 -- | The positions of the enabled items.
@@ -76,7 +72,6 @@ rowAt r height inp
 -- | Consume the menu's input before widgets see it, including dismissal.
 processPopup :: ChibiUI model Bool
 processPopup = do
-  ctx <- askContext
   current <- readCtx ctxPopup
   case current of
     Nothing -> pure False
@@ -84,7 +79,8 @@ processPopup = do
       inp <- getInput
       (r, rowH) <- geometry popup
       let (next, action) = stepPopup inp (rowAt r rowH inp) popup
-      liftIO (writeIORef (ctxPopup ctx) next >> sequence_ action)
+      writeCtx ctxPopup next
+      liftIO (sequence_ action)
       when (isNothing next) requestFrame
       pure True
 
@@ -97,10 +93,12 @@ stepPopup inp pointerRow popup = (next, action)
       let order = if backwards then reverse indices else indices
           beyond = if backwards then (< popupSelected popup) else (> popupSelected popup)
        in firstOr (filter beyond order ++ order)
-    selected | pressedIn KeyDown inp = step False
-             | pressedIn KeyUp inp = step True
-             | pressedIn KeyHome inp = firstOr indices
-             | pressedIn KeyEnd inp = firstOr (reverse indices)
+    selected | Just i <- firstPressed inp
+                 [ (KeyDown, step False)
+                 , (KeyUp, step True)
+                 , (KeyHome, firstOr indices)
+                 , (KeyEnd, firstOr (reverse indices))
+                 ] = i
              | inputMousePos inp /= popupPointer popup,
                Just i <- pointerRow, i `elem` indices = i
              | otherwise = popupSelected popup
@@ -118,12 +116,11 @@ stepPopup inp pointerRow popup = (next, action)
 
 paintPopup :: Input -> ChibiUI model ()
 paintPopup inp = do
-  ctx <- askContext
   current <- readCtx ctxPopup
   forM_ current $ \popup -> do
-    exists <- liftIO (readIORef (ctxRects ctx) >>= \t -> memberRect t (slotOf (popupOwner popup)))
+    exists <- isJust <$> lookupWidgetRect (popupOwner popup)
     if not exists
-      then liftIO (writeIORef (ctxPopup ctx) Nothing)
+      then writeCtx ctxPopup Nothing
       else do
         (r, rowH) <- geometry popup
         th <- theme

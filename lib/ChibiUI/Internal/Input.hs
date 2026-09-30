@@ -15,6 +15,7 @@ module ChibiUI.Internal.Input
   , onMac
   , Input (..)
   , Pressable (..)
+  , firstPressed
   , emptyInput
   , inputInteracted
   , inputPointerHeld
@@ -42,6 +43,7 @@ module ChibiUI.Internal.Input
 import Control.Monad (unless, when)
 import Data.Bits (Bits, clearBit, countTrailingZeros, setBit, testBit, zeroBits, (.&.))
 import Data.IORef (IORef, readIORef, writeIORef)
+import Data.List (find)
 import Data.Word (Word32)
 import System.Info (os)
 import ChibiUI.Internal.Types (Size (..), V2 (..))
@@ -149,6 +151,13 @@ instance Pressable MouseButton where
   releasedIn b = buttonsMember b . inputButtonsReleased
   {-# INLINE heldIn #-}
   heldIn b = buttonsMember b . inputButtonsHeld
+
+-- | Look this frame's presses up in a key table: the value of the first
+-- entry whose key went down, so earlier entries win a tie.
+--
+-- > firstPressed inp [(KeyUp, -1), (KeyDown, 1)]
+firstPressed :: Input -> [(Key, a)] -> Maybe a
+firstPressed inp = fmap snd . find ((`pressedIn` inp) . fst)
 
 -- | No events or held buttons, with a focused 800x600 window and zero
 -- elapsed time. The native session updates window size, focus and delta

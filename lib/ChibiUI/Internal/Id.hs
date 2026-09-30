@@ -1,73 +1,47 @@
--- | Widget ids and the id context they are derived from, from nano-ui.
+-- | Widget ids and the scope paths they are derived from, from nano-ui.
 -- Ids count up in call order among siblings, and a container starts a new
 -- count for its children; widget state is stored under the id, so the same
 -- widgets must run in the same order every frame.
 module ChibiUI.Internal.Id
   ( WidgetId (..)
-  , IdContext (..)
   , initialIdPath
-  , idContextWidgetId
+  , widgetIdAt
+  , positionalPath
+  , keyedPath
   , hashWidgetId
-  , mix64
-  , mixFnv
-  , scopeTag
-  , keyedTag
-  , enterScope
-  , enterKeyed
   ) where
 
 import Data.Bits (shiftR, xor)
+import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Word (Word64)
 
 -- | Stable store and interaction identity. Zero is reserved for no widget.
 newtype WidgetId = WidgetId Word64
   deriving stock (Eq, Ord, Show)
 
--- | Parent-path hash and the next sibling's position within that path.
-data IdContext = IdContext
-  { currentId :: {-# UNPACK #-} !Word64
-  , siblingId :: {-# UNPACK #-} !Word64
-  }
-  deriving stock (Eq, Show)
-
 -- | The root scope's path hash, used at the start of each view pass.
 initialIdPath :: Word64
 initialIdPath = 0x243F6A8885A308D3
 
--- | Id of the next sibling in this context. A zero hash becomes 1, so
--- @WidgetId 0@ never names a real widget.
-{-# INLINE idContextWidgetId #-}
-idContextWidgetId :: IdContext -> WidgetId
-idContextWidgetId (IdContext cid sid) =
-  let
-    raw = mix64 cid sid
-   in
-    if raw == 0 then WidgetId 1 else WidgetId raw
+-- | The id of the widget at sibling position @sib@ in the scope at @path@.
+-- A zero hash becomes 1, so @WidgetId 0@ never names a real widget.
+{-# INLINE widgetIdAt #-}
+widgetIdAt :: Word64 -> Word64 -> WidgetId
+widgetIdAt path sib =
+  let raw = mix64 path sib
+   in if raw == 0 then WidgetId 1 else WidgetId raw
 
--- | Hash salt distinguishing an ordinary child scope from a keyed scope.
-scopeTag :: Word64
-scopeTag = 0x9E3779B185EBCA87
+-- | The path of an ordinary child scope, entered at sibling position @sib@
+-- of the scope at @path@.
+positionalPath :: Word64 -> Word64 -> Word64
+positionalPath path sib = mix64 (mix64 path sib) 0x9E3779B185EBCA87
 
-keyedTag :: Word64
-keyedTag = 0xC2B2AE3D27D4EB4F
-
--- | Return the advanced parent and a fresh child context derived from its
--- sibling position and the supplied tag.
-{-# INLINE enterScope #-}
-enterScope :: Word64 -> IdContext -> (IdContext, IdContext)
-enterScope tag parent = enterChild (siblingId parent) tag parent
-
--- | Return the advanced parent and a child path derived from the key, not the
--- sibling position. Keys must be unique within the parent.
-{-# INLINE enterKeyed #-}
-enterKeyed :: Word64 -> IdContext -> (IdContext, IdContext)
-enterKeyed tag = enterChild tag keyedTag
-
--- | Advance the parent's sibling counter and derive a child path from the
--- parent path, @seed@ and @tag@.
-{-# INLINE enterChild #-}
-enterChild :: Word64 -> Word64 -> IdContext -> (IdContext, IdContext)
-enterChild seed tag (IdContext pid sib) = (IdContext pid (sib + 1), IdContext (mix64 (mix64 pid seed) tag) 0)
+-- | The path of a child scope derived from a key instead of its sibling
+-- position, so it keeps its identity when siblings reorder. Keys must be
+-- unique within the parent.
+keyedPath :: Text -> Word64 -> Word64 -> Word64
+keyedPath key path _ = mix64 (mix64 path (fnv1a key)) 0xC2B2AE3D27D4EB4F
 
 -- | Unwrap the id's hash.
 {-# INLINE hashWidgetId #-}
@@ -87,7 +61,6 @@ mix64 x y =
    in
     z3 * 0x94D049BB133111EB
 
--- | Combine two hash words with an FNV xor-and-multiply step.
-{-# INLINE mixFnv #-}
-mixFnv :: Word64 -> Word64 -> Word64
-mixFnv x y = (x `xor` y) * 1099511628211
+-- | FNV-1a over a key's code points.
+fnv1a :: Text -> Word64
+fnv1a = T.foldl' (\acc c -> (acc `xor` fromIntegral (fromEnum c)) * 1099511628211) 0xcbf29ce484222325

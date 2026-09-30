@@ -4,18 +4,18 @@ module ChibiUI.Internal.Frame
   ( runFrame
   ) where
 
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.IORef
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
 import GHC.Clock (getMonotonicTime)
-import ChibiUI.Internal.Context (Context (..), noWake, noWidget)
+import ChibiUI.Internal.Context (Context (..), Wake (..), noWidget)
 import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Id (WidgetId, initialIdPath)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Menu (processPopup, paintPopup)
-import ChibiUI.Internal.Layout (beginViewport, freshLayout)
+import ChibiUI.Internal.Layout (beginViewport)
 import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
 import ChibiUI.Internal.Types (Rect (..), Size (..))
@@ -31,8 +31,7 @@ runFrame ctx inp view = do
   writeIORef (ctxFocusRequested ctx) False
   writeIORef (ctxFocusables ctx) []
   writeIORef (ctxCursor ctx) UiCursorDefault
-  writeIORef (ctxFrameRequest ctx) False
-  writeIORef (ctxWakeAt ctx) noWake
+  writeIORef (ctxWake ctx) WakeIdle
   -- Widget ids count from the root again, so the same view derives the
   -- same ids every frame.
   writeIORef (ctxIdPath ctx) initialIdPath
@@ -45,7 +44,7 @@ runFrame ctx inp view = do
   theme0 <- readIORef (ctxTheme ctx)
   let pad = themeWindowPad theme0
       Size winW winH = inputWindowSize inp
-  writeIORef (ctxLayout ctx) (beginViewport (Rect pad pad (winW - pad * 2) (winH - pad * 2)) freshLayout)
+  writeIORef (ctxLayout ctx) (beginViewport (Rect pad pad (winW - pad * 2) (winH - pad * 2)))
   focusBefore <- readIORef (ctxFocus ctx)
   blocked <- runChibiUI ctx processPopup
   writeIORef (ctxInputBlocked ctx) blocked
@@ -53,7 +52,7 @@ runFrame ctx inp view = do
   -- The pointer grab outlives the widgets only while a button is held.
   -- Clearing after the view lets the active widget see its release this
   -- frame; a widget that stopped being declared cannot drop it itself.
-  if inputPointerHeld inp then pure () else writeIORef (ctxActive ctx) noWidget
+  unless (inputPointerHeld inp) (writeIORef (ctxActive ctx) noWidget)
   -- Focus: Tab steps through this frame's focusables in declaration
   -- order; a click that no widget answered by claiming focus clears it.
   fs <- reverse <$> readIORef (ctxFocusables ctx)
@@ -64,7 +63,7 @@ runFrame ctx inp view = do
 
   -- Focus resolves after painting. Settle the old/new field visuals and
   -- drafts even when the user produces no further native event.
-  when (focusAfter /= focusBefore) (writeIORef (ctxFrameRequest ctx) True)
+  when (focusAfter /= focusBefore) (modifyIORef' (ctxWake ctx) (min WakeSoon))
   runChibiUI ctx (paintPopup inp)
   dd <- finishFrame (ctxArena ctx)
   pure (a, dd)

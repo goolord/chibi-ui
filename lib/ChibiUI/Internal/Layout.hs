@@ -5,6 +5,7 @@
 -- it lands.
 module ChibiUI.Internal.Layout
   ( LayoutState (..)
+  , LineMode (..)
   , freshLayout
   , LayoutCommand (..)
   , stepLayout
@@ -12,6 +13,7 @@ module ChibiUI.Internal.Layout
   , remainingWidth
   , remainingHeight
   , beginGroup
+  , endGroup
   , contentSize
   , beginViewport
   , beginIndent
@@ -20,6 +22,18 @@ module ChibiUI.Internal.Layout
 
 import Data.Maybe (fromMaybe)
 import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectUnion)
+
+-- | How the next widget joins the current line.
+data LineMode
+  = Stacked
+  -- ^ Below the line: each widget steps the cursor down past itself.
+  | JoinOnce
+  -- ^ Beside the last widget, once: 'sameLine' opened the line, and the
+  -- next widget placed closes it again.
+  | Flowing
+  -- ^ Beside the last widget, always: a @row@'s children flow rightward,
+  -- so 'sameLine' there changes nothing.
+  deriving (Eq, Show)
 
 -- | Where the cursor is and what the next widget inherits.
 data LayoutState = LayoutState
@@ -31,12 +45,7 @@ data LayoutState = LayoutState
   , lsLineH :: {-# UNPACK #-} !Float
   -- ^ The tallest widget placed on the current line, for stepping down
   -- past it and for a @row@ to size itself by.
-  , lsRowOpen :: !Bool
-  -- ^ Whether the line is open for more widgets ('sameLine' or a @row@
-  -- opened it). While it is, widgets advance rightward; closing it steps
-  -- down by the line's height.
-  , lsFlowRow :: !Bool
-  -- ^ A row scope keeps advancing horizontally without 'sameLine'.
+  , lsMode :: !LineMode
   , lsLast :: {-# UNPACK #-} !Rect
   -- ^ The last placed widget's rect, for 'sameLine'.
   , lsIndent :: {-# UNPACK #-} !Float
@@ -56,24 +65,32 @@ data LayoutState = LayoutState
   }
   deriving (Eq, Show)
 
--- | The cursor at the window's origin, stepping down.
-freshLayout :: LayoutState
-freshLayout =
+-- | Whether the line is open for more widgets beside the last.
+lineOpen :: LayoutState -> Bool
+lineOpen ls = lsMode ls /= Stacked
+
+-- | An empty scope with its cursor at @(x, y)@, @w@ wide and reaching down
+-- to @bottom@: every scope a layout starts is one.
+scopeAt :: LineMode -> Float -> Float -> Float -> Float -> LayoutState
+scopeAt mode x y w bottom =
   LayoutState
-    { lsPenX = 0
-    , lsLineY = 0
+    { lsPenX = x
+    , lsLineY = y
     , lsLineH = 0
-    , lsRowOpen = False
-    , lsFlowRow = False
-    , lsLast = Rect 0 0 0 0
-    , lsIndent = 0
+    , lsMode = mode
+    , lsLast = Rect x y 0 0
+    , lsIndent = x
     , lsNextW = Nothing
     , lsNextH = Nothing
-    , lsAvailW = 0
-    , lsBottom = 0
+    , lsAvailW = max 0 w
+    , lsBottom = bottom
     , lsBounded = False
     , lsBounds = Rect 0 0 0 0
     }
+
+-- | The cursor at the window's origin, stepping down.
+freshLayout :: LayoutState
+freshLayout = scopeAt Stacked 0 0 0 0
 
 -- | Commands change the cursor without contributing widget bounds.
 data LayoutCommand = SameLine | Newline | NextWidth !Float | NextHeight !Float | Space !Float
@@ -81,27 +98,32 @@ data LayoutCommand = SameLine | Newline | NextWidth !Float | NextHeight !Float |
 
 stepLayout :: Float -> LayoutCommand -> LayoutState -> LayoutState
 stepLayout gap command ls = case command of
-  SameLine -> ls {lsRowOpen = True, lsPenX = rectX r + rectW r + gap, lsLineY = rectY r}
+  SameLine -> ls
+    { lsMode = if lsMode ls == Flowing then Flowing else JoinOnce
+    , lsPenX = rectX r + rectW r + gap
+    , lsLineY = rectY r
+    }
   Newline -> ls
-    { lsRowOpen = lsFlowRow ls
+    { lsMode = if lsMode ls == Flowing then Flowing else Stacked
     , lsPenX = lsIndent ls
-    , lsLineY = if lsRowOpen ls then lsLineY ls + lsLineH ls + gap else lsLineY ls
+    , lsLineY = if lineOpen ls then lsLineY ls + lsLineH ls + gap else lsLineY ls
     , lsLineH = 0
     }
   NextWidth w -> ls {lsNextW = Just w}
   NextHeight h -> ls {lsNextH = Just h}
-  Space n | lsRowOpen ls -> ls {lsPenX = lsPenX ls + n}
+  Space n | lineOpen ls -> ls {lsPenX = lsPenX ls + n}
           | otherwise -> ls {lsLineY = lsLineY ls + n}
   where r = lsLast ls
 
 -- | Consume size overrides once, accumulate bounds, and advance past the item.
 placeLayout :: Float -> Size -> LayoutState -> (Rect, LayoutState)
 placeLayout gap sz ls = (r, ls
-  { lsPenX = if lsRowOpen ls
-      then if continuesRow then rectX r + w + gap else lsIndent ls
-      else lsPenX ls
-  , lsLineY = if continuesRow then rectY r else rectY r + lineH + gap
-  , lsRowOpen = continuesRow
+  { lsPenX = case lsMode ls of
+      Flowing -> rectX r + w + gap
+      JoinOnce -> lsIndent ls
+      Stacked -> lsPenX ls
+  , lsLineY = if flowing then rectY r else rectY r + lineH + gap
+  , lsMode = if flowing then Flowing else Stacked
   , lsLineH = lineH
   , lsLast = r
   , lsNextW = Nothing
@@ -113,8 +135,8 @@ placeLayout gap sz ls = (r, ls
     w = max 0 (fromMaybe (sizeW sz) (lsNextW ls))
     h = max 0 (fromMaybe (sizeH sz) (lsNextH ls))
     r = Rect (lsPenX ls) (lsLineY ls) w h
-    lineH = if lsRowOpen ls then max (lsLineH ls) h else h
-    continuesRow = lsRowOpen ls && lsFlowRow ls
+    lineH = if lineOpen ls then max (lsLineH ls) h else h
+    flowing = lsMode ls == Flowing
 
 remainingWidth :: LayoutState -> Float
 remainingWidth ls = max 0 (lsIndent ls + lsAvailW ls - lsPenX ls)
@@ -124,19 +146,15 @@ remainingHeight ls = max 0 (lsBottom ls - lsLineY ls)
 
 -- | A group measures its children independently, then occupies one parent item.
 beginGroup :: Bool -> LayoutState -> LayoutState
-beginGroup horizontal ls = ls
-  { lsRowOpen = horizontal
-  , lsFlowRow = horizontal
-  , lsIndent = lsPenX ls
-  , lsAvailW = max 0 (fromMaybe (remainingWidth ls) (lsNextW ls))
-  , lsBottom = maybe (lsBottom ls) (lsLineY ls +) (lsNextH ls)
-  , lsLineH = 0
-  , lsLast = Rect (lsPenX ls) (lsLineY ls) 0 0
-  , lsNextW = Nothing
-  , lsNextH = Nothing
-  , lsBounded = False
-  , lsBounds = Rect 0 0 0 0
-  }
+beginGroup horizontal ls =
+  scopeAt (if horizontal then Flowing else Stacked) (lsPenX ls) (lsLineY ls)
+    (fromMaybe (remainingWidth ls) (lsNextW ls))
+    (maybe (lsBottom ls) (lsLineY ls +) (lsNextH ls))
+
+-- | Leave a group: its size, from where it began in the parent, and the
+-- parent's cursor back, for the group to be placed as one item.
+endGroup :: LayoutState -> LayoutState -> (Size, LayoutState)
+endGroup parent child = (contentSize (V2 (lsPenX parent) (lsLineY parent)) child, parent)
 
 -- | Extent from a scope's origin, excluding trailing cursor spacing.
 contentSize :: V2 -> LayoutState -> Size
@@ -148,21 +166,8 @@ contentSize (V2 x y) child
 
 -- | Lay out scrolling content in its own shifted, vertical coordinate
 -- space. Its bottom is one viewport below its top.
-beginViewport :: Rect -> LayoutState -> LayoutState
-beginViewport r ls = ls
-  { lsPenX = rectX r
-  , lsLineY = rectY r
-  , lsIndent = rectX r
-  , lsAvailW = max 0 (rectW r)
-  , lsBottom = rectY r + rectH r
-  , lsRowOpen = False
-
-  , lsFlowRow = False
-  , lsLineH = 0
-  , lsBounded = False
-  , lsBounds = Rect 0 0 0 0
-  , lsLast = Rect (rectX r) (rectY r) 0 0
-  }
+beginViewport :: Rect -> LayoutState
+beginViewport (Rect x y w h) = scopeAt Stacked x y w (y + h)
 
 beginIndent :: Float -> LayoutState -> LayoutState
 beginIndent n ls = ls
@@ -172,5 +177,5 @@ endIndent :: LayoutState -> LayoutState -> LayoutState
 endIndent parent child = child
   { lsIndent = lsIndent parent
   , lsAvailW = lsAvailW parent
-  , lsPenX = if lsRowOpen child then lsPenX child else lsIndent parent
+  , lsPenX = if lineOpen child then lsPenX child else lsIndent parent
   }

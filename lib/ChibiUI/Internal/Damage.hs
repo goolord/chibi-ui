@@ -11,15 +11,14 @@
 -- rectangles; anything bigger or structurally ambiguous is a full frame.
 module ChibiUI.Internal.Damage
   ( Damage (..)
+  , Upload (..)
   , FrameSnapshot
   , takeSnapshot
   , frameDamage
   , trackFrame
-  , snapshotChangedQuads
-  , commandQuadBounds
+  , trackUploads
   ) where
 
-import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CSize (..))
@@ -31,7 +30,6 @@ import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, vertexSize
 import ChibiUI.Internal.Types
   ( Rect (..)
   , Size (..)
-  , foldUpTo
   , rectArea
   , rectNonEmpty
   , rectsOverlap
@@ -44,8 +42,8 @@ foreign import ccall unsafe "string.h memcmp"
 -- | What a frame owes the screen.
 data Damage
   = DamageNone
-  -- ^ The frame's geometry is byte-identical to the previous one; nothing
-    -- needs drawing.
+  -- ^ Nothing visible changed from the previous frame; nothing needs
+    -- drawing.
   | DamageRects [Rect]
   -- ^ Repaint these logical-pixel rectangles (and the commands intersecting
     -- them) into the retained framebuffer.
@@ -54,10 +52,19 @@ data Damage
     -- the window changed to track.
   deriving (Eq, Show)
 
+-- | What a renderer holding the tracked frame's vertices must upload of
+-- the next one.
+data Upload
+  = UploadNone
+  -- ^ Its copy already draws the frame.
+  | UploadQuads [Int]
+  -- ^ Just these quads, in ascending order; the quad count held.
+  | UploadAll
+  deriving (Eq, Show)
+
 -- | One frame's copied geometry, for diffing against the next frame. The
 -- arena is reset and reused every frame, so a snapshot owns its bytes.
--- 'trackFrame' reuses the buffer of the snapshot it replaces, so a
--- snapshot read out of its reference is valid until the next track.
+-- 'trackFrame' reuses the buffer of the snapshot it replaces.
 data FrameSnapshot = FrameSnapshot
   { snapBuffer :: !(ForeignPtr Word8)
   -- ^ The used prefix of the frame's vertex buffer, in a buffer of
@@ -69,10 +76,6 @@ data FrameSnapshot = FrameSnapshot
     -- shift when quads are inserted or removed, which the quad diff
     -- already sees; a texture changing in place can repaint different
     -- pixels over identical geometry and forces a full frame.
-  , snapChanged :: !(Maybe [Int])
-  -- ^ The quads that changed from the frame tracked before this one, in
-    -- order, over an unchanged quad count; 'Nothing' when unknown or when
-    -- the count changed.
   }
 
 -- | Quads whose diff alone is worth reporting before falling back to a
@@ -90,12 +93,12 @@ damageFullFrac = 0.7
 
 -- | Copy a frame's geometry into an owned snapshot.
 takeSnapshot :: DrawData -> IO FrameSnapshot
-takeSnapshot dd = copyInto Nothing dd Nothing
+takeSnapshot = copyInto Nothing
 
 -- | Copy a frame's geometry into a snapshot, reusing an old snapshot's
 -- buffer when it is large enough.
-copyInto :: Maybe FrameSnapshot -> DrawData -> Maybe [Int] -> IO FrameSnapshot
-copyInto old dd changed = do
+copyInto :: Maybe FrameSnapshot -> DrawData -> IO FrameSnapshot
+copyInto old dd = do
   let len = drawVertexCount dd * vertexSize
   (buf, cap) <- case old of
     Just snap | snapCapacity snap >= len -> pure (snapBuffer snap, snapCapacity snap)
@@ -111,14 +114,7 @@ copyInto old dd changed = do
       , snapCapacity = cap
       , snapBytes = len
       , snapTextures = map cmdTextureId (drawCommands dd)
-      , snapChanged = changed
       }
-
--- | The quads that changed from the frame tracked before the snapshot's,
--- when the quad count stayed the same: a renderer that kept the earlier
--- frame's vertices re-uploads only these. 'Nothing' means everything.
-snapshotChangedQuads :: FrameSnapshot -> Maybe [Int]
-snapshotChangedQuads = snapChanged
 
 -- | Diff a snapshot against the frame just drawn. Texture contents are
 -- assumed unchanged; the backend forces a full frame when the atlas or an
@@ -127,93 +123,80 @@ snapshotChangedQuads = snapChanged
 frameDamage :: FrameSnapshot -> DrawData -> Size -> IO Damage
 frameDamage snap dd window = fst <$> diffFrame snap dd window
 
--- | The damage, and the changed quads when the quad count held.
-diffFrame :: FrameSnapshot -> DrawData -> Size -> IO (Damage, Maybe [Int])
+-- | The damage, and the quads that differ from the snapshot's.
+diffFrame :: FrameSnapshot -> DrawData -> Size -> IO (Damage, Upload)
 diffFrame snap dd window =
   withForeignPtr (snapBuffer snap) $ \old ->
     withForeignPtr (drawVertices dd) $ \new -> do
-      let len = drawVertexCount dd * vertexSize
-          oldTex = snapTextures snap
-          newTex = map cmdTextureId (drawCommands dd)
       same <-
         if len /= snapBytes snap
           then pure False
           else (== 0) <$> c_memcmp old new (fromIntegral len)
-      if same && oldTex == newTex
-        then pure (DamageNone, Just [])
-        else
-          -- The same batch structure over different textures.
-          if oldTex /= newTex && length oldTex == length newTex
-            then pure (DamageFull, Nothing)
-            else do
-              let oldN = snapBytes snap `div` quadBytes
-                  newN = drawVertexCount dd `div` 4
-              diff <- changedQuads old new (min oldN newN) oldN newN
-              pure $ case diff of
-                Nothing -> (DamageFull, Nothing)
-                Just (changed, rects) ->
-                  (mergeDamage window rects, if oldN == newN then Just changed else Nothing)
+      compareWith same old new
+  where
+    len = drawVertexCount dd * vertexSize
+    oldTex = snapTextures snap
+    newTex = map cmdTextureId (drawCommands dd)
+    oldN = snapBytes snap `div` quadBytes
+    newN = drawVertexCount dd `div` 4
+    compareWith same old new
+      | same && oldTex == newTex = pure (DamageNone, UploadNone)
+      -- The same batch structure over different textures.
+      | oldTex /= newTex && length oldTex == length newTex = pure (DamageFull, UploadAll)
+      | otherwise = do
+          diff <- changedQuads old new oldN newN
+          pure $ case diff of
+            Nothing -> (DamageFull, UploadAll)
+            Just (changed, rects) ->
+              (mergeDamage window rects, if oldN == newN then UploadQuads changed else UploadAll)
 
 -- | Diff and update the snapshot a backend keeps of the frame on screen.
--- A damage-free frame keeps the stored bytes: they still describe the
--- current frame exactly.
 trackFrame :: IORef (Maybe FrameSnapshot) -> Size -> DrawData -> IO Damage
-trackFrame ref window dd = do
+trackFrame ref window dd = fst <$> trackUploads ref window dd
+
+-- | 'trackFrame', with what a renderer that keeps the tracked frame's
+-- vertices must upload of this one. A damage-free frame keeps the stored
+-- bytes and uploads nothing: they still draw the current frame exactly.
+trackUploads :: IORef (Maybe FrameSnapshot) -> Size -> DrawData -> IO (Damage, Upload)
+trackUploads ref window dd = do
   prev <- readIORef ref
   case prev of
-    Nothing -> do
-      writeIORef ref . Just =<< copyInto Nothing dd Nothing
-      pure DamageFull
+    Nothing -> (DamageFull, UploadAll) <$ (writeIORef ref . Just =<< copyInto Nothing dd)
     Just snap -> do
-      (damage, changed) <- diffFrame snap dd window
+      diff@(damage, _) <- diffFrame snap dd window
       if damage == DamageNone
-        then when (snapChanged snap /= Just []) (writeIORef ref (Just snap {snapChanged = Just []}))
-        else writeIORef ref . Just =<< copyInto prev dd changed
-      pure damage
+        then pure (DamageNone, UploadNone)
+        else diff <$ (writeIORef ref . Just =<< copyInto prev dd)
 
--- | The quads that differ between the old vertices and the new over
--- @[0, n)@, with the bounds of every quad touched: those, plus the tail
--- quads present in only one of them, from both sides. 'Nothing' when there
--- is too much to track.
-changedQuads :: Ptr Word8 -> Ptr Word8 -> Int -> Int -> Int -> IO (Maybe ([Int], [Rect]))
-changedQuads old new n oldN newN = do
-  diff <- diffQuads old new n
+-- | The quads that differ between the old vertices and the new over the
+-- quads both have, with the bounds of every quad touched: those, plus the
+-- tail quads present in only one of them, from both sides. 'Nothing' when
+-- there is too much to track.
+changedQuads :: Ptr Word8 -> Ptr Word8 -> Int -> Int -> IO (Maybe ([Int], [Rect]))
+changedQuads old new oldN newN = do
+  let n = min oldN newN
+  diff <- diffQuads old new n (maxChangedQuads - (oldN - n) - (newN - n))
   case diff of
-    Just changed
-      | length changed + (oldN - n) + (newN - n) <= maxChangedQuads -> do
-          let touched = changed ++ [n .. oldN - 1] ++ [n .. newN - 1]
-          -- Both sides of every changed quad: the old area may need
-          -- clearing even where the new frame draws nothing.
-          oldSide <- mapM (quadAtPtr old) [k | k <- touched, k < oldN]
-          newSide <- mapM (quadAtPtr new) [k | k <- touched, k < newN]
-          pure (Just (changed, filter rectNonEmpty (oldSide ++ newSide)))
-    _ -> pure Nothing
+    Nothing -> pure Nothing
+    Just changed -> do
+      -- Both sides of every changed quad: the old area may need
+      -- clearing even where the new frame draws nothing.
+      oldSide <- mapM (quadAtPtr old) (changed ++ [n .. oldN - 1])
+      newSide <- mapM (quadAtPtr new) (changed ++ [n .. newN - 1])
+      pure (Just (changed, oldSide ++ newSide))
 
 -- | Indices of the quads over @[0, n)@ whose bytes differ, or 'Nothing'
--- past the tracking budget.
-diffQuads :: Ptr Word8 -> Ptr Word8 -> Int -> IO (Maybe [Int])
-diffQuads old new n = go 0 (0 :: Int) []
+-- past @budget@ of them.
+diffQuads :: Ptr Word8 -> Ptr Word8 -> Int -> Int -> IO (Maybe [Int])
+diffQuads old new n budget = go 0 (0 :: Int) []
   where
     go !k !count acc
-      | count > maxChangedQuads = pure Nothing
+      | count > budget = pure Nothing
       | k >= n = pure (Just (reverse acc))
       | otherwise = do
           let off = k * quadBytes
           d <- c_memcmp (old `plusPtr` off) (new `plusPtr` off) (fromIntegral quadBytes)
           if d == 0 then go (k + 1) count acc else go (k + 1) (count + 1) (k : acc)
-
--- | Union the bounds of a command's quads, for testing a command against
--- a damage rectangle without drawing it.
-commandQuadBounds :: DrawData -> DrawCmd -> IO Rect
-commandQuadBounds dd cmd =
-  withForeignPtr (drawVertices dd) $ \vp -> do
-    let first = fromIntegral (cmdFirstQuad cmd)
-        end = first + fromIntegral (cmdQuadCount cmd)
-    if end <= first
-      then pure (Rect 0 0 0 0)
-      else do
-        seed <- quadAtPtr vp first
-        foldUpTo (end - first - 1) (\acc i -> rectUnion acc <$> quadAtPtr vp (first + 1 + i)) seed
 
 -- | The bounds of quad @k@: the min and max of vertex 0's and vertex 2's
 -- corners in the first 8 bytes of each vertex.
@@ -244,15 +227,6 @@ mergeDamage window rs0
 -- way.
 mergeRects :: [Rect] -> [Rect]
 mergeRects [] = []
-mergeRects (r : rs) = case takeIntersecting r rs of
-  Just (hit, rest) -> mergeRects (rectUnion r hit : rest)
-  Nothing -> r : mergeRects rs
-
--- | The first rectangle overlapping @r@, and the others without it.
-takeIntersecting :: Rect -> [Rect] -> Maybe (Rect, [Rect])
-takeIntersecting r = go []
-  where
-    go _ [] = Nothing
-    go skipped (x : rest)
-      | rectsOverlap r x = Just (x, reverse skipped ++ rest)
-      | otherwise = go (x : skipped) rest
+mergeRects (r : rs) = case break (rectsOverlap r) rs of
+  (before, hit : after) -> mergeRects (rectUnion r hit : before ++ after)
+  _ -> r : mergeRects rs

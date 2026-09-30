@@ -17,11 +17,11 @@ module ChibiUI.Rgfw.Internal.Session
 
 import Control.Concurrent (rtsSupportsBoundThreads, runInBoundThread)
 import Control.Exception (bracket)
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (forM_, unless, void)
 import Data.Bits ((.&.), (.|.))
 import Data.Char (chr, isPrint, toLower)
 import Data.IORef
-import Data.Maybe (isJust, listToMaybe)
+import Data.Maybe (listToMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Text as T
@@ -34,13 +34,13 @@ import qualified System.Environment
 import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, texAtlas)
 import ChibiUI.Internal.Context
   ( Context (..)
+  , Wake (..)
   , newContext
   , setFont
   , setScale
   , setTheme
   , withClipboard
   )
-import ChibiUI.Internal.Damage (snapshotChangedQuads, trackFrame)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
@@ -128,27 +128,17 @@ runChibiApp opts initial view = inBoundThread $
       withClipboard ctx R.readClipboardText (\t -> void (R.writeClipboardText t))
       -- Open at the chosen scale: resize from the settings' logical size,
       -- then centre the window on its monitor.
-      let physAt :: Float -> (Int, Int) -> (Int, Int)
-          physAt scale (w, h) =
-            ( max 1 (round (fromIntegral w * realToFrac scale :: Double))
-            , max 1 (round (fromIntegral h * realToFrac scale :: Double))
-            )
-          (lw, lh) = wsSize settings
-      when (not (wsFullscreen settings)) $ do
-        let (rw, rh) = physAt scaleInit (lw, lh)
-        when ((rw, rh) /= (lw, lh)) $ uncurry (R.resizeWindow win) (rw, rh)
+      let (lw, lh) = wsSize settings
+          phys :: Int -> Int
+          phys v = max 1 (round (fromIntegral v * realToFrac scaleInit :: Double))
+      unless (wsFullscreen settings || (phys lw, phys lh) == (lw, lh)) $
+        R.resizeWindow win (phys lw) (phys lh)
       R.centerWindow win
       R.showWindow win
-      -- Persistent input: each frame starts from the last, with one-shot
-      -- events cleared.
-      inputRef <- newIORef emptyInput
-      -- The pointer in device pixels, or 'Nothing' outside the window: it
-      -- becomes logical each frame, at whatever scale that frame has.
-      pointerRef <- newIORef Nothing
+      pendingRef <- newIORef (Pending emptyInput Nothing)
       cursorRef <- newIORef UiCursorDefault
       now0 <- getMonotonicTime
       lastFrameRef <- newIORef now0
-      snapRef <- newIORef Nothing
       let syncCursor = do
             want <- readIORef (ctxCursor ctx)
             syncCursorKind cursorRef (R.showMouse win) (setIcon . mapRgfwCursor) want
@@ -164,58 +154,41 @@ runChibiApp opts initial view = inBoundThread $
             case ev of
               R.EventNone -> pure closed
               R.EventWindowClose -> drainEvents True
-              R.EventMouseMotion x y -> do
-                writeIORef pointerRef (Just (V2 (fromIntegral x) (fromIntegral y)))
-                drainEvents closed
-              R.EventOther t | t == R.rgfw_mouseLeave -> writeIORef pointerRef Nothing >> drainEvents closed
-              _ -> modifyIORef' inputRef (`applyEvent` ev) >> drainEvents closed
+              _ -> modifyIORef' pendingRef (`stepEvent` ev) >> drainEvents closed
+          -- Settle the scale and the window's size and focus into the input.
           syncWindow = do
-            (pw, ph) <- R.windowSize win
+            size <- R.windowSize win
             monScale <- R.windowScale win
             userScale <- readIORef (ctxScaleOverride ctx)
-            oldScale <- fontScale font
             let scale = resolveScale userScale monScale
-            when (scale /= oldScale) (setScale ctx scale)
+            setScale ctx scale
             focused <- R.windowFocused win
-            pointer <- readIORef pointerRef
-            let logical :: Int -> Float
-                logical v =
-                  fromIntegral
-                    (max 1 (round (fromIntegral v / realToFrac scale :: Double) :: Int))
-                place = maybe applyPointerLeave (\(V2 x y) i -> i {inputMousePos = V2 (x / scale) (y / scale)}) pointer
-            modifyIORef' inputRef $ \i ->
-              (place i) {inputWindowSize = Size (logical pw) (logical ph), inputWindowFocused = focused}
+            modifyIORef' pendingRef (settleInput scale size focused)
           renderAndSwap renderer = do
-            inp0 <- readIORef inputRef
+            inp0 <- pendInput <$> readIORef pendingRef
             scale <- fontScale font
             (pw, ph) <- R.windowSize win
             theme1 <- readIORef (ctxTheme ctx)
             (_, dd) <- runFrame ctx inp0 view
             images <- readIORef (ctxImages ctx)
-            damage <- trackFrame snapRef (inputWindowSize inp0) dd
-            changed <- (>>= snapshotChangedQuads) <$> readIORef snapRef
-            renderFrameGl renderer font images scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage changed
+            renderFrameGl renderer font images scale (max 1 pw) (max 1 ph) (themeWindow theme1) (inputWindowSize inp0) dd
             R.swapBuffersGL win
             -- Clear one-shot events and stamp the timing of the frame that
             -- just ran onto the next one.
             now <- getMonotonicTime
             prev <- readIORef lastFrameRef
-            modifyIORef'
-              inputRef
-              ( \i ->
-                  (clearEphemeral i) {inputDeltaTime = realToFrac (now - prev)}
-              )
+            modifyIORef' pendingRef $ \p ->
+              p {pendInput = (clearEphemeral (pendInput p)) {inputDeltaTime = realToFrac (now - prev)}}
             writeIORef lastFrameRef now
             syncCursor
           loop renderer = do
             quit <- readIORef (ctxQuit ctx)
-            requested <- readIORef (ctxFrameRequest ctx)
-            wakeAt <- readIORef (ctxWakeAt ctx)
+            wake <- readIORef (ctxWake ctx)
             now <- getMonotonicTime
-            let wait
-                  | requested = timeoutMs
-                  | isInfinite wakeAt = -1
-                  | otherwise = max 1 (ceiling ((wakeAt - now) * 1000))
+            let wait = case wake of
+                  WakeSoon -> timeoutMs
+                  WakeAt t -> max 1 (ceiling ((t - now) * 1000))
+                  WakeIdle -> -1
             unless quit $ do
               R.waitForEvent wait
               closed <- drainEvents False
@@ -232,10 +205,9 @@ runChibiApp opts initial view = inBoundThread $
           Just path -> do
             (pw, ph) <- R.windowSize win
             -- Re-run the frame for its draw list: the arena was reused.
-            (_, dd) <- readIORef inputRef >>= \inp -> runFrame ctx inp view
+            (_, dd) <- readIORef pendingRef >>= \p -> runFrame ctx (pendInput p) view
             dumpFrame renderer font dd path (max 1 pw) (max 1 ph)
-          Nothing -> pure ()
-        unless (isJust dumpPath) (loop renderer)
+          Nothing -> loop renderer
     resolveScale user mon
       | validScale user = user
       | validScale mon = mon
@@ -337,9 +309,36 @@ mapRgfwCursor = \case
   UiCursorText -> R.rgfw_mouseIbeam
   _ -> R.rgfw_mouseArrow
 
--- | Fold one RGFW event into frame input; the session handles motion,
--- leave and close itself. Control characters are dropped: some platforms
--- send Ctrl+letter as one, and the key event already reports the chord.
+-- | What the event queue has told the session between frames: the input,
+-- which persists from frame to frame with one-shot events cleared, and the
+-- pointer in device pixels, or 'Nothing' outside the window. The pointer
+-- becomes logical each frame, at whatever scale that frame has.
+data Pending = Pending
+  { pendInput :: !Input
+  , pendPointer :: !(Maybe V2)
+  }
+
+-- | Fold one RGFW event into what is pending; the loop handles close.
+stepEvent :: Pending -> R.Event -> Pending
+stepEvent p = \case
+  R.EventMouseMotion x y -> p {pendPointer = Just (V2 (fromIntegral x) (fromIntegral y))}
+  R.EventOther t | t == R.rgfw_mouseLeave -> p {pendPointer = Nothing}
+  ev -> p {pendInput = applyEvent (pendInput p) ev}
+
+-- | Settle the pointer, and the window's native size and focus, into the
+-- input, in logical pixels at @scale@.
+settleInput :: Float -> (Int, Int) -> Bool -> Pending -> Pending
+settleInput scale (pw, ph) focused p = p {pendInput = placed {inputWindowSize = Size (logical pw) (logical ph), inputWindowFocused = focused}}
+  where
+    logical :: Int -> Float
+    logical v = fromIntegral (max 1 (round (fromIntegral v / realToFrac scale :: Double) :: Int))
+    placed = case pendPointer p of
+      Just (V2 x y) -> (pendInput p) {inputMousePos = V2 (x / scale) (y / scale)}
+      Nothing -> applyPointerLeave (pendInput p)
+
+-- | Fold one RGFW event into frame input, past the pointer. Control
+-- characters are dropped: some platforms send Ctrl+letter as one, and the
+-- key event already reports the chord.
 applyEvent :: Input -> R.Event -> Input
 applyEvent inp = \case
   -- RGFW numbers buttons from 0 in 'mouseButtonNumber' order: left, middle,

@@ -19,6 +19,7 @@ module ChibiUI.Internal.Widgets
   ) where
 
 import Control.Monad (foldM, forM, forM_, mfilter, when, void)
+import Data.List (transpose)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -61,22 +62,41 @@ widgetRect measure = do
 -- while keyboard-focused.
 button :: Text -> ChibiUI model Bool
 button t = do
-  (wid, r) <- widgetRect $ do
+  (_, r, i) <- interactive clickable $ do
     Size w h <- textSize t
     pure (Size (w + widgetPad * 2) (h + widgetPad * 2))
   th <- theme
-  i <- interaction clickable wid r
-  let surface
-        | iActive i = themeSurfaceActive th
-        | iHovered i = themeSurfaceHover th
-        | otherwise = themeSurface th
-  fillRectUI r surface
-  strokeRectUI r 1 (if iFocused i then themeAccent th else themeBorder th)
+  fillRectUI r (surfaceFor th i)
+  frameBorder th r (iFocused i)
   textInRect r t (themeText th)
   pure (iClicked i)
 
--- | What the pointer and keyboard did to a widget this frame.
-data Interaction = Interaction {iHovered, iActive, iFocused, iClicked :: !Bool}
+-- | The surface under a widget: pressed, hovered, or at rest.
+surfaceFor :: Theme -> Interaction -> Color
+surfaceFor th i
+  | iActive i = themeSurfaceActive th
+  | iHovered i = themeSurfaceHover th
+  | otherwise = themeSurface th
+
+-- | A widget's 1px border: the accent while focused.
+frameBorder :: Theme -> Rect -> Bool -> ChibiUI model ()
+frameBorder th r focused = strokeRectUI r 1 (if focused then themeAccent th else themeBorder th)
+
+-- | A 1px accent border while focused, for widgets with no border at rest.
+focusRing :: Theme -> Rect -> Bool -> ChibiUI model ()
+focusRing th r focused = when focused (strokeRectUI r 1 (themeAccent th))
+
+-- | What the pointer and keyboard did to a widget this frame, and the
+-- frame's input, for the rest of what the widget reads.
+data Interaction = Interaction
+  { iHovered, iActive, iFocused, iClicked :: !Bool
+  , iInput :: !Input
+  }
+
+-- | The value for the first of these keys pressed while the widget has
+-- the keyboard: a widget's own small key table.
+focusedKey :: Interaction -> [(Key, a)] -> Maybe a
+focusedKey i keys = if iFocused i then firstPressed (iInput i) keys else Nothing
 
 -- | How a widget takes the pointer and the keyboard.
 data InteractionSpec = InteractionSpec
@@ -115,7 +135,15 @@ interaction p wid r = do
     , iActive = act
     , iFocused = focused
     , iClicked = (releasedIn MouseLeft inp && act && hov) || (focused && any (`pressedIn` inp) [KeyEnter, KeySpace])
+    , iInput = inp
     }
+
+-- | Place an input-taking widget: its id, its rect, and what it got.
+interactive :: InteractionSpec -> ChibiUI model Size -> ChibiUI model (WidgetId, Rect, Interaction)
+interactive p measure = do
+  (wid, r) <- widgetRect measure
+  i <- interaction p wid r
+  pure (wid, r, i)
 
 -- | A collapsible branch, initially closed. Click or Enter/Space toggles;
 -- Left closes and Right opens a focused header. Children run only while open.
@@ -123,24 +151,20 @@ interaction p wid r = do
 -- one layout group, so opening it never changes the identity of later siblings.
 treeNode :: Text -> ChibiUI model () -> ChibiUI model ()
 treeNode title body = column $ do
-  (wid, r) <- widgetRect $ do
+  (wid, r, i) <- interactive clickable $ do
     width <- availWidth
     pure (Size width (lineHeight + widgetPad * 2))
   let gutter = lineHeight + widgetPad
   wasOpen <- isJust <$> widgetState treeOpen wid
-  i <- interaction clickable wid r
-  inp <- getInput
-  let open | iFocused i && pressedIn KeyLeft inp = False
-           | iFocused i && pressedIn KeyRight inp = True
-           | iClicked i = not wasOpen
-           | otherwise = wasOpen
+  let open = fromMaybe (if iClicked i then not wasOpen else wasOpen)
+        (focusedKey i [(KeyLeft, False), (KeyRight, True)])
   when (open /= wasOpen) $ do
     setWidgetState treeOpen wid (if open then Just () else Nothing)
     requestFrame
   th <- theme
   withClip r $ do
-    when (iHovered i || iActive i) (fillRectUI r (if iActive i then themeSurfaceActive th else themeSurfaceHover th))
-    when (iFocused i) (strokeRectUI r 1 (themeAccent th))
+    when (iHovered i || iActive i) (fillRectUI r (surfaceFor th i))
+    focusRing th r (iFocused i)
     let x = rectX r + gutter / 2
         y = rectY r + rectH r / 2
     fillRectUI (Rect (x - 4.5) (y - 0.5) 9 1) (themeTextDim th)
@@ -200,21 +224,17 @@ cappedSize w h = (\avail -> Size (min avail w) h) <$> availWidth
 -- tenth of the range. Returns the value it now holds.
 slider :: Float -> Float -> Float -> ChibiUI model Float
 slider value lo hi = do
-  (wid, r) <- widgetRect (fieldSize 160)
+  (_, r, i) <- interactive clickable (fieldSize 160)
   th <- theme
-  i <- interaction clickable wid r
-  inp <- getInput
-  let act = iActive i
-      focused = iFocused i
+  let inp = iInput i
       range = hi - lo
       frac v = if range > 0 then clamp01 ((v - lo) / range) else 0
       atFrac f = lo + f * range
       underPointer = clamp01 ((v2X (inputMousePos inp) - rectX r) / max 1 (rectW r))
       step = range / 10
       moved
-        | act && heldIn MouseLeft inp = atFrac underPointer
-        | focused && pressedIn KeyLeft inp = clamp lo hi (value - step)
-        | focused && pressedIn KeyRight inp = clamp lo hi (value + step)
+        | iActive i && heldIn MouseLeft inp = atFrac underPointer
+        | Just d <- focusedKey i [(KeyLeft, -step), (KeyRight, step)] = clamp lo hi (value + d)
         | otherwise = value
       tw = min 8 (max 0 (rectW r))
       thumbX = rectX r + tw / 2 + frac moved * max 0 (rectW r - tw)
@@ -223,7 +243,7 @@ slider value lo hi = do
   fillRectUI (Rect (rectX r) (cy - 2) (rectW r) 4) (themeSurface th)
   fillRectUI (Rect (rectX r) (cy - 2) (max 0 (thumbX - rectX r)) 4) (themeAccent th)
   fillRectUI (Rect (thumbX - tw / 2) (cy - thumbH / 2) tw thumbH) (themeText th)
-  when focused (strokeRectUI r 1 (themeAccent th))
+  focusRing th r (iFocused i)
   pure moved
 
 data FieldMode = SingleLine | MultiLine | ReadOnly deriving (Eq)
@@ -256,7 +276,7 @@ editing = \case
 stepDraft :: DraftEvent -> Draft -> Draft
 stepDraft event draft = case (event, draft) of
   (BeginEdit value, Inactive ed) -> Editing value
-    (if editText (editState ed) == value then ed else newEditor value)
+    (if editorText ed == value then ed else newEditor value)
   (UpdateEdit ed, Editing original _) -> Editing original ed
   (UpdateEdit ed, Inactive _) -> Inactive ed
   (CommitEdit, _) -> Inactive (draftEditor draft)
@@ -270,44 +290,43 @@ stepNumber value inp t
   | otherwise = T.pack (show (parseNumber value t + delta))
   where
     amount = if modShift (inputModifiers inp) then 10 else 1
-    delta | pressedIn KeyUp inp = amount
-          | pressedIn KeyDown inp = negate amount
-          | otherwise = 0
+    delta = fromMaybe 0 (firstPressed inp [(KeyUp, amount), (KeyDown, negate amount)])
 
 -- | The shared editing lifecycle: seeding the draft on focus, folding this
 -- frame's keys and text into it, scrolling to the caret, drawing, and the
 -- value the caller should keep.
 textField :: FieldMode -> ChibiUI model Size -> Text -> (Input -> Text -> Text) -> ChibiUI model Text
 textField mode measure value transform = do
-  (wid, r) <- widgetRect measure
-  i <- interaction editable wid r
-  inp <- getInput
+  (wid, r, i) <- interactive editable measure
   saved <- fromMaybe (FieldState (Inactive (newEditor value)) (V2 0 0) Nothing Nothing)
     <$> widgetState textFields wid
-  let readOnly = mode == ReadOnly
+  let inp = iInput i
+      readOnly = mode == ReadOnly
       focused = iFocused i
       escaped = focused && pressedIn KeyEscape inp
       before = fieldDraft saved
       started = if focused then stepDraft (BeginEdit value) before else before
-      current = if readOnly && editText (editState (draftEditor started)) /= value
+      current = if readOnly && editorText (draftEditor started) /= value
         then stepDraft (UpdateEdit (newEditor value)) started else started
-      -- The next state around a draft; the scroll resets when an edit ends.
+      -- The next state around a draft; the scroll resets when an edit
+      -- ends. Only a draft that stopped editing compares: an editing
+      -- draft's equality walks its whole undo history.
       settle draft = saved
         { fieldDraft = draft
-        , fieldScroll = if draft /= before && not (editing draft) then V2 0 0 else fieldScroll saved
+        , fieldScroll = if not (editing draft) && draft /= before then V2 0 0 else fieldScroll saved
         }
+      -- A draft the frame ended or cancelled, without editing it.
+      settled draft = pure (Just (settle draft), draftEditor draft, False)
   -- This frame's state (none for an idle field), the editor to show, and
   -- whether the caret moved by editing, so the view scrolls to it.
   (next, shown, reveal) <- case (focused, current) of
     (False, Inactive _) -> pure (Nothing, newEditor value, False)
-    (False, Editing _ _) -> let d = stepDraft CommitEdit current in pure (Just (settle d), draftEditor d, False)
-    _ | escaped ->
-      let d = if readOnly then Inactive (newEditor value) else stepDraft CancelEdit current
-       in pure (Just (settle d), draftEditor d, False)
+    (False, Editing _ _) -> settled (stepDraft CommitEdit current)
+    _ | escaped -> settled (if readOnly then Inactive (newEditor value) else stepDraft CancelEdit current)
     _ -> do
       (edited, click) <- editStep mode i r saved (draftEditor current)
-      let text = transform inp (editText (editState edited))
-          ed = if text == editText (editState edited) then edited else replace text (command SelectAll edited)
+      let text = transform inp (editorText edited)
+          ed = if text == editorText edited then edited else replace text (command SelectAll edited)
           updated = stepDraft (UpdateEdit ed) current
           d = if mode /= MultiLine && pressedIn KeyEnter inp then stepDraft CommitEdit updated else updated
           moved = not (editing before) || editState ed /= editState (draftEditor current)
@@ -325,11 +344,13 @@ textField mode measure value transform = do
   th <- theme
   drawField mode r shown active layout th
   when (focused && not escaped) $ do
+    -- A focused field always has an entry. The action keeps only the id
+    -- and the command, not this frame's state, while the menu is open.
     let hasSelection = uncurry (/=) (selection shown)
         queue cmd = do
           requestFocus wid
-          latest <- fromMaybe final <$> widgetState textFields wid
-          setWidgetState textFields wid (Just latest {fieldQueued = Just cmd})
+          latest <- widgetState textFields wid
+          forM_ latest $ \st' -> setWidgetState textFields wid (Just st' {fieldQueued = Just cmd})
     openContextMenu wid r
       [ (title, enabled, queue cmd)
       | (title, enabled, cmd) <-
@@ -338,11 +359,11 @@ textField mode measure value transform = do
           , ("Cut", hasSelection, Cut)
           , ("Copy", hasSelection, Copy)
           , ("Paste", True, Paste)
-          , ("Select all", not (T.null (editText (editState shown))), SelectAll)
+          , ("Select all", not (T.null (editorText shown)), SelectAll)
           ]
       , commandAllowed mode cmd
       ]
-  pure (editText (editState shown))
+  pure (editorText shown)
 
 data PointerStep = KeepSelection | DragSelection | ClickSelection !ClickState
 
@@ -369,12 +390,12 @@ stepPointer inp hoveredField active now previous
 -- editor and the last press.
 editStep :: FieldMode -> Interaction -> Rect -> FieldState -> Editor -> ChibiUI model (Editor, Maybe ClickState)
 editStep mode i r saved ed0 = do
-  inp <- getInput
-  let multiline = mode == MultiLine
+  let inp = iInput i
+      multiline = mode == MultiLine
       hov = iHovered i
       active = iActive i
       pressed = hov && pressedIn MouseLeft inp
-      t = editText (editState ed0)
+      t = editorText ed0
       inner = fieldInner mode r
       V2 offset offsetY = fieldScroll saved
       V2 px py = inputMousePos inp
@@ -440,26 +461,28 @@ data FieldLayout = FieldLayout !Rect [(Int, Text)] !Int !Float !V2
 -- while editing the caret stays in view, on every frame for a single line
 -- and after an edit (@reveal@) for a text area.
 fieldLayout :: FieldMode -> Rect -> Editor -> Bool -> Bool -> V2 -> ChibiUI model FieldLayout
-fieldLayout mode r ed focused reveal (V2 oldX oldY) = do
+fieldLayout mode r ed focused reveal old = do
   let EditState t caret _ = editState ed
       multiline = mode == MultiLine
       inner = fieldInner mode r
       ls = if multiline then textLines t else [(0, t)]
       (caretRow, (lineStart, line)) = caretRowLine ls caret
-  -- An unfocused single line never scrolls, so it needs neither the caret
-  -- pen nor the line widths.
+  -- An unfocused single line never scrolls, so it needs no caret pen.
   caretPen <- if focused then measureText (T.take (caret - lineStart) line) else pure 0
-  widths <- if focused || multiline then mapM (measureText . snd) ls else pure []
-  wheelX <- if multiline then wheelScroll r v2X oldX else pure oldX
-  wheelY <- if multiline then wheelScroll r v2Y oldY else pure oldY
+  V2 wheelX wheelY <- if multiline then wheelScroll r old else pure old
   let keepVisible pos size extent offset
         | pos < offset = pos
         | pos + size > offset + extent = pos + size - extent
         | otherwise = offset
-      x = clampScroll (maximum (0 : widths) + 1) (rectW inner) $
-        if focused && (reveal || not multiline) then keepVisible caretPen 1 (rectW inner) wheelX
-        else if multiline then wheelX else 0
-      y
+      wantX
+        | focused && (reveal || not multiline) = keepVisible caretPen 1 (rectW inner) wheelX
+        | multiline = wheelX
+        | otherwise = 0
+  -- Only a scroll right of the start needs the widest line to clamp it.
+  x <- if wantX <= 0 then pure 0 else do
+    widths <- mapM (measureText . snd) ls
+    pure (clampScroll (maximum (0 : widths) + 1) (rectW inner) wantX)
+  let y
         | not multiline = 0
         | otherwise = clampScroll (fromIntegral (length ls) * lineHeight) (rectH inner) $
             if focused && reveal
@@ -471,15 +494,14 @@ fieldLayout mode r ed focused reveal (V2 oldX oldY) = do
 -- caret while focused.
 drawField :: FieldMode -> Rect -> Editor -> Bool -> FieldLayout -> Theme -> ChibiUI model ()
 drawField mode r ed focused (FieldLayout inner ls caretRow caretPen (V2 shift shiftY)) th = do
-  let t = editText (editState ed)
-      readOnly = mode == ReadOnly
+  let t = editorText ed
       multiline = mode == MultiLine
       innerX = rectX inner
       top = if multiline then rectY inner - shiftY else alignedTextY (themeTextAlign th) inner
       (a, b) = selection ed
-  when (not readOnly) $ do
+  when (mode /= ReadOnly) $ do
     fillRectUI r (themeSurface th)
-    strokeRectUI r 1 (if focused then themeAccent th else themeBorder th)
+    frameBorder th r focused
   withClip inner $ do
     forM_ (zip [0 :: Int ..] ls) $ \(lineIndex, (start, text)) -> do
       let y = top + fromIntegral lineIndex * lineHeight
@@ -577,31 +599,28 @@ drawPolyline col ps = drawIO $ \arena ->
 table :: [Text] -> [[Text]] -> ChibiUI model (Maybe Int)
 table headers rows = do
   th <- theme
-  let cellAt c r = if c < length r then r !! c else ""
-      cellPadX = 4
+  let cellPadX = 4
       cellPadY = 3
       colCount = length headers
-  naturalWidths <-
-    forM [0 .. colCount - 1] $ \c -> do
-      hw <- measureText (cellAt c headers)
-      rws <- mapM (measureText . cellAt c) rows
-      pure (maximum (hw + cellPadX * 2 : map (+ cellPadX * 2) rws))
+      -- One cell per header in every row: ragged rows pad with blanks.
+      cells = map (take colCount . (++ repeat "")) rows
+  naturalWidths <- forM (transpose (headers : cells)) $ \col ->
+    (+ cellPadX * 2) . maximum <$> mapM measureText col
   let totalW = sum naturalWidths
       rowH = lineHeight + cellPadY * 2
       tableH = rowH * fromIntegral (1 + length rows)
-  (wid, r) <- widgetRect (cappedSize totalW tableH)
+  (wid, r, ia) <- interactive clickable (cappedSize totalW tableH)
   let widths = map (\w -> if totalW > 0 then w * rectW r / totalW else 0) naturalWidths
       columns = zip (scanl (+) (rectX r) widths) widths
-      drawRow y cells bg = do
+      drawRow y line bg = do
         fillRectUI (Rect (rectX r) y (rectW r) rowH) bg
-        forM_ (zip columns (cells ++ repeat "")) $ \((x, w), cell) ->
+        forM_ (zip columns line) $ \((x, w), cell) ->
           drawTextIn (Rect (x + cellPadX) (y + cellPadY)
             (max 0 (w - cellPadX * 2)) lineHeight) cell (themeText th)
         fillRectUI (Rect (rectX r) (y + rowH - 1) (rectW r) 1) (themeBorder th)
-  ia <- interaction clickable wid r
-  inp <- getInput
   stored <- widgetState tableSelection wid
-  let n = length rows
+  let inp = iInput ia
+      n = length rows
       hoverI
         | iHovered ia = Just (floor ((v2Y (inputMousePos inp) - rectY r - rowH) / rowH) :: Int)
         | otherwise = Nothing
@@ -610,19 +629,18 @@ table headers rows = do
       step d = if n == 0 then Nothing else Just (clamp 0 (n - 1) (fromMaybe (-1) current + d))
       selected
         | pressedIn MouseLeft inp, Just h <- hoverI, h >= 0 && h < n = Just h
-        | iFocused ia && pressedIn KeyDown inp = step 1
-        | iFocused ia && pressedIn KeyUp inp = step (-1)
+        | Just d <- focusedKey ia [(KeyDown, 1), (KeyUp, -1)] = step d
         | otherwise = current
   when (selected /= stored) (setWidgetState tableSelection wid selected)
   withClip r $ do
     drawRow (rectY r) headers (themeSurface th)
-    forM_ (zip3 [0 ..] (iterate (+ rowH) (rectY r + rowH)) rows) $ \(i, y, cells) -> do
+    forM_ (zip3 [0 ..] (iterate (+ rowH) (rectY r + rowH)) cells) $ \(i, y, line) -> do
       let bg | selected == Just i = themeSurfaceActive th
              | hoverI == Just i = themeRowHover th
              | odd i = themeRowAlt th
              | otherwise = themeWindow th
-      drawRow y cells bg
-    when (iFocused ia) (strokeRectUI r 1 (themeAccent th))
+      drawRow y line bg
+    focusRing th r (iFocused ia)
   pure selected
 
 -- | Clip and scroll a body: the region fills the rest of its scope's width
@@ -634,19 +652,17 @@ scrollColumn :: ChibiUI model a -> ChibiUI model a
 scrollColumn body = do
   (wid, r) <- widgetRect ((\ls -> Size (Layout.remainingWidth ls) (Layout.remainingHeight ls)) <$> readLayout)
   th <- theme
-  parent <- readLayout
   let barW = 4
   -- The extent is last frame's: the body has not run yet.
   saved@(ScrollState scroll0 extent) <- fromMaybe (ScrollState 0 0) <$> widgetState scrollRegions wid
-  offset <- clampScroll extent (rectH r) <$> wheelScroll r v2Y scroll0
+  offset <- clampScroll extent (rectH r) . v2Y <$> wheelScroll r (V2 0 scroll0)
   let viewport = r {rectW = max 0 (rectW r - barW)}
       content = viewport {rectY = rectY r - offset}
   -- Clip to the region and shift the body up by the scroll.
-  layoutState (const ((), Layout.beginViewport content parent))
-  a <- withClip viewport (scoped body)
-  ls1 <- readLayout
-  let contentH = sizeH (Layout.contentSize (V2 (rectX content) (rectY content)) ls1)
-      maxScroll = max 0 (contentH - rectH r)
+  (a, Size _ contentH) <- layoutScope (const (Layout.beginViewport content))
+    (\parent inner -> (Layout.contentSize (V2 (rectX content) (rectY content)) inner, parent))
+    (withClip viewport body)
+  let maxScroll = max 0 (contentH - rectH r)
       scroll1 = clampScroll contentH (rectH r) offset
       next = ScrollState scroll1 contentH
   when (next /= saved) (setWidgetState scrollRegions wid (Just next))
@@ -659,20 +675,19 @@ scrollColumn body = do
         thumbY = rectY r + (rectH r - thumbH) * (scroll1 / maxScroll)
     fillRectUI trackR (themeSurface th)
     fillRectUI (Rect (rectX trackR) thumbY barW thumbH) (themeBorder th)
-  layoutState (const ((), parent))
   pure a
 
 -- | How far one wheel step scrolls.
 scrollStep :: Float
 scrollStep = lineHeight * 3
 
--- | An offset moved by this frame's wheel along one axis, while the pointer
--- is over the region.
-wheelScroll :: Rect -> (V2 -> Float) -> Float -> ChibiUI model Float
-wheelScroll r axis offset = do
+-- | An offset moved by this frame's wheel, while the pointer is over the
+-- region.
+wheelScroll :: Rect -> V2 -> ChibiUI model V2
+wheelScroll r offset@(V2 x y) = do
   hov <- hovered r
-  wheel <- scrollDelta
-  pure (if hov then offset + axis wheel * scrollStep else offset)
+  V2 dx dy <- scrollDelta
+  pure (if hov then V2 (x + dx * scrollStep) (y + dy * scrollStep) else offset)
 
 -- | Keep an offset within what a @content@ extent can scroll through a
 -- @view@ extent.

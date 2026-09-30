@@ -31,6 +31,7 @@ module ChibiUI.Internal.Monad
   -- * Placement
   , place
   , layoutState
+  , layoutScope
   , readLayout
   , availWidth
   , textSize
@@ -69,6 +70,7 @@ module ChibiUI.Internal.Monad
   , addFocusable
   , wantCursor
   , recordRect
+  , lookupWidgetRect
   -- * Drawing
   , theme
   , withTheme
@@ -91,22 +93,20 @@ module ChibiUI.Internal.Monad
   ) where
 
 import Control.Monad.IO.Class (MonadIO (..))
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks, withReaderT)
 import Control.Monad.State.Class (MonadState (..), gets, modify, modify')
 import qualified Data.ByteString as BS
 import Data.IORef
 import qualified Data.IntMap.Strict as IM
 import Data.Text (Text)
-import qualified Data.Text as T
 import Data.Word (Word64)
 import ChibiUI.Internal.Context
   ( Context (..)
   , ModelAccess (..)
   , ImageEntry (..)
+  , Wake (..)
   , noWidget
-  , readClipboard
-  , writeClipboard
   )
 import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Font (lineHeight, fontDrawText, fontMeasure, fontScale)
@@ -114,7 +114,7 @@ import ChibiUI.Internal.Id
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (LayoutState)
 import qualified ChibiUI.Internal.Layout as Layout
-import ChibiUI.Internal.RectTable (insertRect)
+import ChibiUI.Internal.RectTable (insertRect, lookupRect)
 import ChibiUI.Internal.Store
 import ChibiUI.Internal.Style (Theme (..), TextAlign, alignedTextY, fieldHeight)
 import ChibiUI.Internal.Types
@@ -128,9 +128,7 @@ newtype ChibiUI model a = ChibiUI (ReaderT (Context model) IO a)
 -- the model in the context also lets deferred menu actions use its latest value.
 instance MonadState model (ChibiUI model) where
   get = askContext >>= liftIO . readModel . ctxModel
-  put model = do
-    ctx <- askContext
-    liftIO (writeModel (ctxModel ctx) model)
+  put model = state (const ((), model))
   state f = do
     ctx <- askContext
     liftIO (stateModel (ctxModel ctx) f)
@@ -157,7 +155,6 @@ mapModel project replace (ChibiUI view) = ChibiUI (withReaderT focus view)
         parent = ctxModel ctx
         access = ModelAccess
           { readModel = project <$> readModel parent
-          , writeModel = \child -> stateModel parent (\whole -> ((), replace child whole))
           , stateModel = \f -> stateModel parent $ \whole ->
               let (result, child) = f (project whole) in (result, replace child whole)
           }
@@ -193,39 +190,39 @@ nextId :: ChibiUI model WidgetId
 nextId = do
   ctx <- ask
   liftIO $ do
-    cid <- readIORef (ctxIdPath ctx)
+    path <- readIORef (ctxIdPath ctx)
     sib <- readIORef (ctxIdSib ctx)
     writeIORef (ctxIdSib ctx) $! sib + 1
-    pure $! idContextWidgetId (IdContext cid sib)
+    pure $! widgetIdAt path sib
 
 -- | Run a container's body: the next sibling position becomes the child
 -- path, and the body's widgets count from a fresh sibling counter.
 scoped :: ChibiUI model a -> ChibiUI model a
-scoped = withIdScope (enterScope scopeTag)
+scoped = withIdScope positionalPath
 
 -- | Run a body under a key unique among its siblings, so widgets whose
 -- order changes keep their state. The same key twice in one container is
 -- two widgets sharing an id.
 withKey :: Text -> ChibiUI model a -> ChibiUI model a
-withKey key = withIdScope (enterKeyed (fnv1a key))
+withKey key = withIdScope (keyedPath key)
 
-withIdScope :: (IdContext -> (IdContext, IdContext)) -> ChibiUI model a -> ChibiUI model a
-withIdScope enter body = do
+-- | Run a body in a child scope whose path @childPath@ derives from the
+-- parent's path and sibling position. The scope takes the parent's next
+-- sibling position, as a widget would.
+withIdScope :: (Word64 -> Word64 -> Word64) -> ChibiUI model a -> ChibiUI model a
+withIdScope childPath body = do
   ctx <- ask
-  parent' <- liftIO $ do
-    parent <- IdContext <$> readIORef (ctxIdPath ctx) <*> readIORef (ctxIdSib ctx)
-    let !(parent', child) = enter parent
-    writeIORef (ctxIdPath ctx) $! currentId child
-    writeIORef (ctxIdSib ctx) $! siblingId child
-    pure parent'
+  (path, sib) <- liftIO $ do
+    path <- readIORef (ctxIdPath ctx)
+    sib <- readIORef (ctxIdSib ctx)
+    writeIORef (ctxIdPath ctx) $! childPath path sib
+    writeIORef (ctxIdSib ctx) 0
+    pure (path, sib)
   a <- body
   liftIO $ do
-    writeIORef (ctxIdPath ctx) $! currentId parent'
-    writeIORef (ctxIdSib ctx) $! siblingId parent'
+    writeIORef (ctxIdPath ctx) path
+    writeIORef (ctxIdSib ctx) $! sib + 1
   pure a
-
-fnv1a :: Text -> Word64
-fnv1a = T.foldl' (\acc c -> mixFnv acc (fromIntegral (fromEnum c))) 0xcbf29ce484222325
 
 -- | The hashed key of a widget id, as the store addresses it.
 {-# INLINE slotOf #-}
@@ -315,20 +312,26 @@ column = group False
 
 group :: Bool -> ChibiUI model a -> ChibiUI model a
 group horizontal body = do
-  before <- layoutState (\ls -> (ls, Layout.beginGroup horizontal ls))
-  a <- scoped body
-  let origin = V2 (Layout.lsPenX before) (Layout.lsLineY before)
-  size <- layoutState (\after -> (Layout.contentSize origin after, before))
-  _ <- place size
-  pure a
+  (a, size) <- layoutScope (Layout.beginGroup horizontal) Layout.endGroup body
+  a <$ place size
 
 -- | Indent a body's lines by @n@ logical pixels.
 indent :: Float -> ChibiUI model a -> ChibiUI model a
-indent n body = do
-  before <- layoutState (\ls -> (ls, Layout.beginIndent n ls))
+indent n body = fst <$> layoutScope (Layout.beginIndent n) (\parent child -> ((), Layout.endIndent parent child)) body
+
+-- | Run a body in a layout scope: @enter@ derives the body's cursor from
+-- the parent's, and @leave@ gets the parent and the body's final cursor
+-- back, to settle the cursor after it. Every layout scope is an id scope.
+layoutScope
+  :: (LayoutState -> LayoutState)
+  -> (LayoutState -> LayoutState -> (b, LayoutState))
+  -> ChibiUI model a
+  -> ChibiUI model (a, b)
+layoutScope enter leave body = do
+  parent <- layoutState (\ls -> (ls, enter ls))
   a <- scoped body
-  layoutState (\after -> ((), Layout.endIndent before after))
-  pure a
+  b <- layoutState (leave parent)
+  pure (a, b)
 
 -- | Give the next widget a width, instead of its measured one.
 nextWidth :: Float -> ChibiUI model ()
@@ -402,7 +405,7 @@ uiScale = readCtx ctxFont >>= liftIO . fontScale
 -- | Request a device scale; zero restores automatic monitor DPI. Takes
 -- effect in the next native frame. Non-finite values are ignored.
 setUiScale :: Float -> ChibiUI model ()
-setUiScale scale = when (not (isNaN scale || isInfinite scale)) $ do
+setUiScale scale = unless (isNaN scale || isInfinite scale) $ do
   writeCtx ctxScaleOverride (max 0 scale)
   requestFrame
 
@@ -480,10 +483,14 @@ wantCursor = writeCtx ctxCursor
 {-# INLINE recordRect #-}
 recordRect :: WidgetId -> Rect -> ChibiUI model ()
 recordRect wid r = do
-  ctx <- ask
-  liftIO $ do
-    rects <- readIORef (ctxRects ctx)
-    insertRect rects (slotOf wid) r
+  rects <- readCtx ctxRects
+  liftIO (insertRect rects (slotOf wid) r)
+
+-- | Where a widget landed this frame, if it has been declared yet.
+lookupWidgetRect :: WidgetId -> ChibiUI model (Maybe Rect)
+lookupWidgetRect wid = do
+  rects <- readCtx ctxRects
+  liftIO (lookupRect rects (slotOf wid))
 
 -- | The theme, for colours and spacing.
 theme :: ChibiUI model Theme
@@ -491,15 +498,19 @@ theme = readCtx ctxTheme
 
 -- | Draw a body with another theme.
 withTheme :: Theme -> ChibiUI model a -> ChibiUI model a
-withTheme t body = do
-  old <- theme
-  writeCtx ctxTheme t
-  body <* writeCtx ctxTheme old
+withTheme t = locally ctxTheme (const t)
 
+-- | Draw a body with text aligned vertically another way.
 withTextAlign :: TextAlign -> ChibiUI model a -> ChibiUI model a
-withTextAlign align body = do
-  th <- theme
-  withTheme th {themeTextAlign = align} body
+withTextAlign align = locally ctxTheme (\th -> th {themeTextAlign = align})
+
+-- | Run a body with one of the context's references changed, restoring it
+-- after.
+locally :: (Context model -> IORef s) -> (s -> s) -> ChibiUI model a -> ChibiUI model a
+locally field f body = do
+  old <- readCtx field
+  writeCtx field (f old)
+  body <* writeCtx field old
 
 -- | Give the next label the standard field height, aligning captions with
 -- their neighboring text/number input in a row.
@@ -533,9 +544,18 @@ strokeRectUI r bw c = drawIO $ \a -> strokeRect a r bw c
 -- | One line of text clipped to a rectangle, with its top-left at the
 -- rectangle's top-left.
 drawTextIn :: Rect -> Text -> Color -> ChibiUI model ()
-drawTextIn r t col = do
+drawTextIn = textAlignedIn 0
+
+-- | Centre one line of text in a rectangle.
+textInRect :: Rect -> Text -> Color -> ChibiUI model ()
+textInRect = textAlignedIn 0.5
+
+-- | One line of text clipped to a rectangle: @ax@ of the way across it,
+-- as 'drawTextAt' aligns, and placed vertically as the theme aligns text.
+textAlignedIn :: Float -> Rect -> Text -> Color -> ChibiUI model ()
+textAlignedIn ax r t col = do
   th <- theme
-  withClip r $ drawGlyphs (rectX r) (alignedTextY (themeTextAlign th) r) t col
+  withClip r $ drawTextAt (V2 (rectX r + rectW r * ax) (alignedTextY (themeTextAlign th) r)) ax 0 t col
 
 -- | One line of text at a point: @ax@ and @ay@ in 0..1 name the alignment
 -- point within the text's box, so @(0, 0.5)@ centres on the point
@@ -559,23 +579,16 @@ drawGlyphs x y t col = do
       font <- readIORef (ctxFont ctx)
       fontDrawText font a x y col t
 
--- | Centre one line of text in a rectangle.
-textInRect :: Rect -> Text -> Color -> ChibiUI model ()
-textInRect r t col = do
-  th <- theme
-  withClip r $ drawTextAt
-    (V2 (rectX r + rectW r / 2) (alignedTextY (themeTextAlign th) r))
-    0.5 0 t col
-
 -- | Ask for another frame even without input, as a view that changes on a
 -- timer does.
 requestFrame :: ChibiUI model ()
-requestFrame = writeCtx ctxFrameRequest True
+requestFrame = modifyCtx ctxWake (min WakeSoon)
 
 -- | Ask for a frame once 'uiTime' reaches @t@, as a blink or a timeout
--- does; the loop sleeps until then unless input comes first.
+-- does; the loop sleeps until then unless input comes first. Non-finite
+-- times are ignored.
 requestFrameAt :: Double -> ChibiUI model ()
-requestFrameAt t = modifyCtx ctxWakeAt (min t)
+requestFrameAt t = unless (isNaN t || isInfinite t) (modifyCtx ctxWake (min (WakeAt t)))
 
 -- | End the session after this frame.
 quitUi :: ChibiUI model ()
@@ -589,8 +602,8 @@ useImageRgba img w h version px = modifyCtx ctxImages (IM.insert img (ImageEntry
 
 -- | The system clipboard's text, if it holds any.
 getClipboard :: ChibiUI model (Maybe Text)
-getClipboard = ask >>= liftIO . readClipboard
+getClipboard = readCtx ctxClipboardGet >>= liftIO
 
 -- | Replace the system clipboard's text.
 setClipboard :: Text -> ChibiUI model ()
-setClipboard t = ask >>= liftIO . (`writeClipboard` t)
+setClipboard t = readCtx ctxClipboardPut >>= \write -> liftIO (write $! t)

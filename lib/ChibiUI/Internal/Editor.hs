@@ -2,7 +2,7 @@
 -- Character offsets, selection and bounded snapshots; no document tree.
 module ChibiUI.Internal.Editor
   ( Editor (..), EditState (..), Command (..), Motion (..)
-  , newEditor, selection, selectedText, select, selectWord, replace, command, inputCommands
+  , newEditor, editorText, selection, selectedText, select, selectWord, replace, command, inputCommands
   , textLines, caretRowLine, sanitizeText
   ) where
 
@@ -43,7 +43,7 @@ selection :: Editor -> (Int, Int)
 selection ed = let EditState _ c a = editState ed in (min c a, max c a)
 
 selectedText :: Editor -> Text
-selectedText ed = let (a, b) = selection ed in T.take (b - a) (T.drop a (editText (editState ed)))
+selectedText ed = let (a, b) = selection ed in T.take (b - a) (T.drop a (editorText ed))
 
 select :: Int -> Int -> Editor -> Editor
 select a c ed = ed {editState = s {editCaret = limit c, editAnchor = limit a}}
@@ -57,7 +57,7 @@ selectWord index ed
   | otherwise = select (i - T.length (T.takeWhileEnd same (T.take i t)))
       (i + T.length (T.takeWhile same (T.drop i t))) ed
   where
-    t = editText (editState ed)
+    t = editorText ed
     i = clamp 0 (T.length t - 1) index
     same c = wordCategory c == wordCategory (T.index t i)
 
@@ -68,16 +68,24 @@ wordCategory c
   | isAlphaNum c || c == '_' = 1
   | otherwise = 2
 
+-- | The editor's text.
+editorText :: Editor -> Text
+editorText = editText . editState
+
+-- | Replace the selection with text, leaving the caret after it.
 replace :: Text -> Editor -> Editor
-replace raw ed =
-  let s = editState ed
-      (a, b) = selection ed
-      text = sanitizeText True raw
-      t = T.take a (editText s) <> text <> T.drop b (editText s)
-      c = a + T.length text
-   in ed {editState = EditState t c c,
-          editUndo = if t == editText s then editUndo ed else remember s (editUndo ed),
-          editRedo = if t == editText s then editRedo ed else []}
+replace raw ed = replaceFrom (editState ed) raw ed
+
+-- | 'replace', with the state an undo of it returns to.
+replaceFrom :: EditState -> Text -> Editor -> Editor
+replaceFrom s0 raw ed
+  | t == editorText ed = ed {editState = EditState t c c}
+  | otherwise = Editor (EditState t c c) (remember s0 (editUndo ed)) []
+  where
+    (a, b) = selection ed
+    text = sanitizeText True raw
+    t = T.take a (editorText ed) <> text <> T.drop b (editorText ed)
+    c = a + T.length text
 
 -- | Push an undo step, bounded two ways: at most 'undoDepth' states, and
 -- at most 'undoBudget' bytes of retained text across them, so editing a
@@ -163,10 +171,7 @@ command cmd ed = case cmd of
           | not extend && a /= b && m == Forward = b
           | otherwise = target m s
      in select (if extend then editAnchor s else c) c ed
-  Delete m ->
-    let result = replace "" (if a /= b then ed else select (editCaret s) (target m s) ed)
-     in if editText (editState result) == editText s then result
-        else result {editUndo = remember s (editUndo ed)}
+  Delete m -> replaceFrom s "" (if a /= b then ed else select (editCaret s) (target m s) ed)
   Undo -> case editUndo ed of
     (x, _) : xs -> Editor x xs (entryOf s : editRedo ed)
     [] -> ed

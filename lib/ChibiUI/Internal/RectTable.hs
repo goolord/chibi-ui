@@ -15,7 +15,6 @@ module ChibiUI.Internal.RectTable
   , clearRectTable
   , insertRect
   , lookupRect
-  , memberRect
   , rectTableToList
   ) where
 
@@ -72,15 +71,13 @@ newRectTable = do
   pure (RectTable kref rref cap count)
 
 allocKeys :: Int -> IO MBox
-allocKeys n@(I# n#) = do
-  box <-
-    IO $ \s -> case newByteArray# (n# *# 8#) s of (# s', arr #) -> (# s', MBox arr #)
+allocKeys n = do
+  box <- newBox (n * 8)
   zeroKeys box n
   pure box
 
 allocRects :: Int -> IO MBox
-allocRects (I# n#) =
-  IO $ \s -> case newByteArray# (n# *# 16#) s of (# s', arr #) -> (# s', MBox arr #)
+allocRects n = newBox (n * 16)
 
 -- | Zero every key, which empties the table. Coordinates go stale, but no
 -- zero-keyed slot is ever read.
@@ -153,50 +150,54 @@ slotFor rt k = do
 -- | The key stored at an entry index; zero for an empty entry.
 {-# INLINE readKeyAt #-}
 readKeyAt :: RectTable -> Int -> IO Int
-readKeyAt rt (I# i#) = do
-  MBox keys <- readIORef (rtKeys rt)
-  IO $ \s -> case readIntArray# keys i# s of
-    (# s', key# #) -> (# s', I# key# #)
+readKeyAt rt i = readIORef (rtKeys rt) >>= \keys -> readIntAt keys i
 
 {-# INLINE writeKeyAt #-}
 writeKeyAt :: RectTable -> Int -> Int -> IO ()
-writeKeyAt rt (I# i#) (I# k#) = do
-  MBox keys <- readIORef (rtKeys rt)
-  IO $ \s -> case writeIntArray# keys i# k# s of
-    s' -> (# s', () #)
+writeKeyAt rt i k = readIORef (rtKeys rt) >>= \keys -> writeIntAt keys i k
 
 {-# INLINE writeRectAt #-}
 writeRectAt :: RectTable -> Int -> Rect -> IO ()
-writeRectAt rt (I# i#) (Rect (F# x) (F# y) (F# w) (F# h)) = do
-  MBox rects <- readIORef (rtRects rt)
-  let base# = i# *# 4#
-  IO $ \s -> case writeFloatArray# rects base# x s of
-    s1 -> case writeFloatArray# rects (base# +# 1#) y s1 of
-      s2 -> case writeFloatArray# rects (base# +# 2#) w s2 of
-        s3 -> case writeFloatArray# rects (base# +# 3#) h s3 of
-          s4 -> (# s4, () #)
+writeRectAt rt i (Rect x y w h) = do
+  rects <- readIORef (rtRects rt)
+  let put k = writeFloatAt rects (i * 4 + k)
+  put 0 x >> put 1 y >> put 2 w >> put 3 h
 
 -- | The rect stored at an entry index.
 {-# INLINE readRectAt #-}
 readRectAt :: RectTable -> Int -> IO Rect
-readRectAt rt (I# i#) = do
-  MBox rects <- readIORef (rtRects rt)
-  let base# = i# *# 4#
-  IO $ \s -> case readFloatArray# rects base# s of
-    (# s1, x #) -> case readFloatArray# rects (base# +# 1#) s1 of
-      (# s2, y #) -> case readFloatArray# rects (base# +# 2#) s2 of
-        (# s3, w #) -> case readFloatArray# rects (base# +# 3#) s3 of
-          (# s4, h #) -> (# s4, Rect (F# x) (F# y) (F# w) (F# h) #)
+readRectAt rt i = do
+  rects <- readIORef (rtRects rt)
+  let get k = readFloatAt rects (i * 4 + k)
+  Rect <$> get 0 <*> get 1 <*> get 2 <*> get 3
+
+-- The array primitives the table is built from, indexed by element.
+
+{-# INLINE newBox #-}
+newBox :: Int -> IO MBox
+newBox (I# bytes#) = IO $ \s -> case newByteArray# bytes# s of (# s', arr #) -> (# s', MBox arr #)
+
+{-# INLINE readIntAt #-}
+readIntAt :: MBox -> Int -> IO Int
+readIntAt (MBox a) (I# i#) = IO $ \s -> case readIntArray# a i# s of (# s', n# #) -> (# s', I# n# #)
+
+{-# INLINE writeIntAt #-}
+writeIntAt :: MBox -> Int -> Int -> IO ()
+writeIntAt (MBox a) (I# i#) (I# n#) = IO $ \s -> (# writeIntArray# a i# n# s, () #)
+
+{-# INLINE readFloatAt #-}
+readFloatAt :: MBox -> Int -> IO Float
+readFloatAt (MBox a) (I# i#) = IO $ \s -> case readFloatArray# a i# s of (# s', f# #) -> (# s', F# f# #)
+
+{-# INLINE writeFloatAt #-}
+writeFloatAt :: MBox -> Int -> Float -> IO ()
+writeFloatAt (MBox a) (I# i#) (F# f#) = IO $ \s -> (# writeFloatArray# a i# f# s, () #)
 
 -- | The rect recorded under a slot this frame, if any.
 lookupRect :: RectTable -> Int -> IO (Maybe Rect)
 lookupRect rt k = do
   i <- probe rt k
   if i < 0 then pure Nothing else Just <$> readRectAt rt i
-
--- | Whether a slot was recorded this frame.
-memberRect :: RectTable -> Int -> IO Bool
-memberRect rt k = (>= 0) <$> probe rt k
 
 -- | Every recorded slot and rect, in slot order, for hosts and tests.
 rectTableToList :: RectTable -> IO [(Int, Rect)]

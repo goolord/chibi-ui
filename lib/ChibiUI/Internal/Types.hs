@@ -8,16 +8,11 @@ module ChibiUI.Internal.Types
   , colorRGBA
   , colorWhite
   , colorTransparent
-  , colorR
-  , colorG
-  , colorB
-  , colorA
   , colorFloats
   , clamp
   , clamp01
   , roundHalfUp
   , validScale
-  , rectContains
   , rectNonEmpty
   , rectHit
   , rectUnion
@@ -26,7 +21,6 @@ module ChibiUI.Internal.Types
   , rectInflate
   , rectArea
   , v2Sub
-  , foldUpTo
   ) where
 
 import Data.Maybe (isJust)
@@ -76,32 +70,12 @@ colorWhite, colorTransparent :: Color
 colorWhite = Color 0xFFFFFFFF
 colorTransparent = Color 0
 
--- | Red channel, in the range 0-255.
-{-# INLINE colorR #-}
-colorR :: Color -> Word8
-colorR (Color w) = fromIntegral ((w `shiftR` 24) .&. 0xFF)
-
--- | Green channel, in the range 0-255.
-{-# INLINE colorG #-}
-colorG :: Color -> Word8
-colorG (Color w) = fromIntegral ((w `shiftR` 16) .&. 0xFF)
-
--- | Blue channel, in the range 0-255.
-{-# INLINE colorB #-}
-colorB :: Color -> Word8
-colorB (Color w) = fromIntegral ((w `shiftR` 8) .&. 0xFF)
-
--- | Alpha channel, from 0 (transparent) to 255 (opaque).
-{-# INLINE colorA #-}
-colorA :: Color -> Word8
-colorA (Color w) = fromIntegral (w .&. 0xFF)
-
 -- | Red, green, blue and alpha, each normalised to 0-1.
 {-# INLINE colorFloats #-}
 colorFloats :: Color -> (Float, Float, Float, Float)
-colorFloats c = (f (colorR c), f (colorG c), f (colorB c), f (colorA c))
+colorFloats (Color w) = (channel 24, channel 16, channel 8, channel 0)
   where
-    f ch = fromIntegral ch / 255
+    channel s = fromIntegral ((w `shiftR` s) .&. 0xFF) / 255
 
 -- | Restrict a value to inclusive lower and upper bounds, which must be ordered.
 {-# INLINE clamp #-}
@@ -127,21 +101,17 @@ roundHalfUp r =
 validScale :: Float -> Bool
 validScale s = s > 0 && not (isNaN s || isInfinite s)
 
--- | Test a point against half-open rectangle bounds.
-{-# INLINE rectContains #-}
-rectContains :: Rect -> V2 -> Bool
-rectContains (Rect x y w h) (V2 px py) =
-  px >= x && px < x + w && py >= y && py < y + h
-
 -- | Whether both width and height are strictly positive.
 {-# INLINE rectNonEmpty #-}
 rectNonEmpty :: Rect -> Bool
 rectNonEmpty r = rectW r > 0 && rectH r > 0
 
--- | Hit test that rejects empty and negative-size rectangles.
+-- | Test a point against half-open rectangle bounds, rejecting empty and
+-- negative-size rectangles.
 {-# INLINE rectHit #-}
 rectHit :: Rect -> V2 -> Bool
-rectHit r p = rectNonEmpty r && rectContains r p
+rectHit r@(Rect x y w h) (V2 px py) =
+  rectNonEmpty r && px >= x && px < x + w && py >= y && py < y + h
 
 -- | Smallest bounding rectangle containing both inputs. Empty inputs are
 -- still included by their coordinates; filter them first if they mean no area.
@@ -186,12 +156,3 @@ rectArea (Rect _ _ w h) = w * h
 {-# INLINE v2Sub #-}
 v2Sub :: V2 -> V2 -> V2
 v2Sub (V2 x1 y1) (V2 x2 y2) = V2 (x1 - x2) (y1 - y2)
-
--- | Strict left fold over @0 .. n - 1@.
-{-# INLINE foldUpTo #-}
-foldUpTo :: Int -> (a -> Int -> IO a) -> a -> IO a
-foldUpTo n f = go 0
-  where
-    go !i !acc
-      | i >= n = pure acc
-      | otherwise = f acc i >>= go (i + 1)

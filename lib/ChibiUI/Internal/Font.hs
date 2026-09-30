@@ -151,11 +151,7 @@ peekGlyph p = do
 -- | Load the font at scale 1. The bytes are copied into C memory, so the
 -- caller may release them.
 newFont :: ByteString -> IO Font
-newFont bytes = do
-  st <- newIORef =<< FontState nullPtr 0 0 0 0 0 <$> newIOArray (0, lowGlyphs - 1) missGlyph <*> newIORef IM.empty
-  let f = Font {fBytes = bytes, fState = st}
-  fontSetScale f 1
-  pure f
+newFont bytes = Font bytes <$> (newIORef =<< loadState bytes 1)
 
 -- | (Re)load the C font at a UI scale. The raster size is the line height
 -- in device pixels; RFont caches glyphs per size, so a scale change starts
@@ -166,30 +162,35 @@ fontSetScale f scale = do
   old <- readIORef (fState f)
   when (scale' /= fsScale old) $ do
     when (fsHandle old /= nullPtr) (c_free (fsHandle old))
-    let sizeD = max 8 (round (lineHeight * scale') :: Int)
-    h <-
-      BSU.unsafeUseAsCStringLen (fBytes f) $ \(p, len) ->
-        c_init (castPtr p) (fromIntegral len) (fromIntegral sizeD) (fromIntegral atlasWidth) (fromIntegral atlasHeight)
-    when (h == nullPtr) $ fail "chibi-ui: font failed to load"
-    low <- newIOArray (0, lowGlyphs - 1) missGlyph
-    high <- newIORef IM.empty
-    (fh, ds, sa) <- allocaBytes 12 $ \m -> do
-      c_metrics h m (plusPtr m 4) (plusPtr m 8)
-      (,,) <$> (peekByteOff m 0 :: IO Float) <*> (peekByteOff m 4 :: IO Float) <*> (peekByteOff m 8 :: IO Float)
-    writeIORef (fState f)
-      FontState
-        { fsHandle = h
-        , fsScale = scale'
-        , fsSize = sizeD
-        , fsFHeight = fh
-        , fsDescent = ds
-          -- The space advance in device pixels, precomputed: a space has
-          -- no glyph box, so its width comes from the font's hmtx entry
-          -- scaled by the raster size.
-        , fsSpaceAdv = if fh > 0 then sa * fromIntegral sizeD / fh else 0
-        , fsLow = low
-        , fsHigh = high
-        }
+    writeIORef (fState f) =<< loadState (fBytes f) scale'
+
+-- | A fresh C font and empty glyph caches at a valid UI scale.
+loadState :: ByteString -> Float -> IO FontState
+loadState bytes scale = do
+  let sizeD = max 8 (round (lineHeight * scale) :: Int)
+  h <-
+    BSU.unsafeUseAsCStringLen bytes $ \(p, len) ->
+      c_init (castPtr p) (fromIntegral len) (fromIntegral sizeD) (fromIntegral atlasWidth) (fromIntegral atlasHeight)
+  when (h == nullPtr) $ fail "chibi-ui: font failed to load"
+  low <- newIOArray (0, lowGlyphs - 1) missGlyph
+  high <- newIORef IM.empty
+  (fh, ds, sa) <- allocaBytes 12 $ \m -> do
+    c_metrics h m (plusPtr m 4) (plusPtr m 8)
+    (,,) <$> (peekByteOff m 0 :: IO Float) <*> (peekByteOff m 4 :: IO Float) <*> (peekByteOff m 8 :: IO Float)
+  pure
+    FontState
+      { fsHandle = h
+      , fsScale = scale
+      , fsSize = sizeD
+      , fsFHeight = fh
+      , fsDescent = ds
+        -- The space advance in device pixels, precomputed: a space has
+        -- no glyph box, so its width comes from the font's hmtx entry
+        -- scaled by the raster size.
+      , fsSpaceAdv = if fh > 0 then sa * fromIntegral sizeD / fh else 0
+      , fsLow = low
+      , fsHigh = high
+      }
 
 -- | Device pixels per logical pixel the font rasterizes at.
 fontScale :: Font -> IO Float
@@ -204,23 +205,34 @@ fontFree f = do
 
 -- | The width of one line of text, in logical pixels: the sum of glyph
 -- advances. Newlines advance nothing. Measuring rasterizes the glyphs, so
--- repeated frames are cache reads; the loop walks the text by UTF-8 byte
--- offsets, allocating nothing per character.
+-- repeated frames are cache reads.
 fontMeasure :: Font -> Text -> IO Float
 fontMeasure f t = do
   st <- readIORef (fState f)
-  let end = TU.lengthWord8 t
-      go !acc !i
-        | i >= end = pure acc
-        | otherwise = case charAt t i of
-            (# cp, d #)
-              | cp == cpSpace || cp == cpTab -> go (acc + fsSpaceAdv st) (i + d)
-              | cp == cpLF || cp == cpCR -> go acc (i + d)
-              | otherwise -> do
-                  g <- glyph st cp
-                  go (acc + max 0 (gdAdvance g)) (i + d)
-  dev <- go 0 0
+  dev <- walkGlyphs st t 0 (\_ _ -> pure ())
   pure (dev * recip (fsScale st))
+
+-- | Walk one line's glyphs from a device-pixel pen, visiting each glyph at
+-- its pen, and return the final pen. Measuring and drawing both walk here,
+-- so drawn spacing is exactly what 'fontMeasure' reports: newlines advance
+-- nothing, tabs read as spaces. The walk goes by UTF-8 byte offsets and
+-- inlines at each caller with its visitor, so a steady-state walk
+-- allocates nothing per character.
+{-# INLINE walkGlyphs #-}
+walkGlyphs :: FontState -> Text -> Float -> (Float -> GlyphDev -> IO ()) -> IO Float
+walkGlyphs st t pen0 visit = go pen0 0
+  where
+    end = TU.lengthWord8 t
+    go !pen !i
+      | i >= end = pure pen
+      | otherwise = case charAt t i of
+          (# cp, d #)
+            | cp == cpLF || cp == cpCR -> go pen (i + d)
+            | cp == cpSpace || cp == cpTab -> go (pen + fsSpaceAdv st) (i + d)
+            | otherwise -> do
+                g <- glyph st cp
+                visit pen g
+                go (pen + max 0 (gdAdvance g)) (i + d)
 
 -- | The sentinel 'findWithDefault' returns for a glyph not yet
 -- rasterized: a negative advance, which no real glyph has.
@@ -267,10 +279,7 @@ rasterize st cp = do
 -- | Draw one line of text as glyph quads into the draw arena, with the
 -- line box's top-left at the logical pen. Baseline math follows RFont's:
 -- the baseline sits @(fheight + descent) / fheight@ of the size below the
--- line top, and each glyph hangs from the baseline by its bearings. Tabs
--- read as spaces; newlines advance nothing. The walk and the cached-glyph
--- lookups are unboxed, so a steady-state draw allocates nothing per
--- character.
+-- line top, and each glyph hangs from the baseline by its bearings.
 --
 -- Glyphs are rasterized once at whole device pixels, so their quads must
 -- land back on whole device pixels: a fractional pen makes nearest-texel
@@ -280,7 +289,7 @@ rasterize st cp = do
 -- fractionally, so spacing stays true to 'fontMeasure'.
 fontDrawText :: Font -> DrawArena -> Float -> Float -> Color -> Text -> IO ()
 fontDrawText f arena penX penY col t = do
-  st@FontState {fsHandle = h, fsScale = scale, fsSize = sizeD, fsFHeight = fh, fsDescent = ds, fsSpaceAdv = sa} <-
+  st@FontState {fsHandle = h, fsScale = scale, fsSize = sizeD, fsFHeight = fh, fsDescent = ds} <-
     readIORef (fState f)
   when (h /= nullPtr) $ do
     let baseline =
@@ -289,29 +298,20 @@ fontDrawText f arena penX penY col t = do
             else fromIntegral sizeD
         baseY = fromIntegral (roundHalfUp (penY * scale + baseline))
         invScale = recip scale
-        end = TU.lengthWord8 t
-    let go !pen !i
-          | i >= end = pure ()
-          | otherwise = case charAt t i of
-              (# cp, d #)
-                | cp == cpLF || cp == cpCR -> go pen (i + d)
-                | cp == cpSpace || cp == cpTab -> go (pen + sa) (i + d)
-                | otherwise -> do
-                    g <- glyph st cp
-                    when (gdW g > 0 && gdH g > 0) $
-                      let px = fromIntegral (roundHalfUp pen)
-                       in emitQuadUV arena texAtlas
-                            ((px + gdX1 g) * invScale)
-                            ((baseY + gdY1 g) * invScale)
-                            ((px + gdX1 g + gdW g) * invScale)
-                            ((baseY + gdY1 g + gdH g) * invScale)
-                            col
-                            (gdU0 g)
-                            (gdV0 g)
-                            (gdU1 g)
-                            (gdV1 g)
-                    go (pen + max 0 (gdAdvance g)) (i + d)
-    go (penX * scale) 0
+    _ <- walkGlyphs st t (penX * scale) $ \pen g ->
+      when (gdW g > 0 && gdH g > 0) $
+        let px = fromIntegral (roundHalfUp pen)
+         in emitQuadUV arena texAtlas
+              ((px + gdX1 g) * invScale)
+              ((baseY + gdY1 g) * invScale)
+              ((px + gdX1 g + gdW g) * invScale)
+              ((baseY + gdY1 g + gdH g) * invScale)
+              col
+              (gdU0 g)
+              (gdV0 g)
+              (gdU1 g)
+              (gdV1 g)
+    pure ()
 
 -- | The atlas coverage bytes. The pointer is stable for the font's
 -- lifetime; read it only while the dirty flag says new glyphs exist.

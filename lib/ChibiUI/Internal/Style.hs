@@ -41,8 +41,9 @@ data Theme = Theme
   , themeGap :: !Float
   -- ^ Space between widgets laid out one after another.
   , themeWindowPad :: !Float
-  , themeTextAlign :: !TextAlign
   -- ^ Space between the window edge and the first widget.
+  , themeTextAlign :: !TextAlign
+  -- ^ Where a line of text sits in a box taller than it.
   }
   deriving (Eq, Show)
 
@@ -66,10 +67,10 @@ defaultTheme =
     , themeTextAlign = AlignMiddle
     }
 
--- | A light theme.
+-- | A light theme: the dark theme's spacing in light colours.
 lightTheme :: Theme
 lightTheme =
-  Theme
+  defaultTheme
     { themeWindow = colorRGBA 247 247 245 255
     , themeSurface = colorRGBA 255 255 255 255
     , themeSurfaceHover = colorRGBA 236 236 233 255
@@ -81,9 +82,6 @@ lightTheme =
     , themeAccentText = colorRGBA 255 255 255 255
     , themeRowAlt = colorRGBA 240 240 237 255
     , themeRowHover = colorRGBA 226 226 222 255
-    , themeGap = 6
-    , themeWindowPad = 10
-    , themeTextAlign = AlignMiddle
     }
 
 -- | Space between a widget's box and its text.

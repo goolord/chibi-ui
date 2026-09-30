@@ -1,3 +1,6 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
+
 -- | The context: the state that outlives a frame. One per window; the
 -- backend creates it, folds each frame's events into its input, runs the
 -- view against it, and renders the draw list it leaves behind.
@@ -6,20 +9,17 @@ module ChibiUI.Internal.Context
   , ModelAccess (..)
   , ImageEntry (..)
   , Popup (..)
+  , Wake (..)
   , newContext
   , noWidget
-  , noWake
   , setTheme
   , setScale
   , withClipboard
   , setFont
   , contextInput
   , frameRects
-  , readClipboard
-  , writeClipboard
   ) where
 
-import Control.Monad (join)
 import Data.IntMap.Strict (IntMap)
 import Data.IORef
 import qualified Data.ByteString as BS
@@ -90,10 +90,8 @@ data Context model = Context
   , ctxTime :: !(IORef Double)
   -- ^ Monotonic seconds, for the caret blink.
   , ctxQuit :: !(IORef Bool)
-  , ctxFrameRequest :: !(IORef Bool)
-  -- ^ A view asked for another frame; otherwise the loop blocks on input.
-  , ctxWakeAt :: !(IORef Double)
-  -- ^ The earliest 'ctxTime' a view asked for a frame at; 'noWake' for none.
+  , ctxWake :: !(IORef Wake)
+  -- ^ When the view wants its next frame; otherwise the loop blocks on input.
   , ctxArena :: !DrawArena
   , ctxLayout :: !(IORef LayoutState)
   , ctxIdPath :: !(IORef Word64)
@@ -107,11 +105,22 @@ data Context model = Context
   , ctxClipboardPut :: !(IORef (Text -> IO ()))
   }
 
+-- | When a view wants its next frame. Requests combine with 'min': the
+-- soonest wins.
+data Wake
+  = WakeSoon
+  -- ^ As soon as the loop's pace allows.
+  | WakeAt !Double
+  -- ^ Once 'ctxTime' reaches this time.
+  | WakeIdle
+  -- ^ Not until input arrives.
+  deriving (Eq, Ord, Show)
+
 -- | Live model operations. Projections compose these rather than copying a
 -- model into a temporary reference, so deferred actions see current state.
+-- Every write goes through 'stateModel', which forces the new model.
 data ModelAccess model = ModelAccess
   { readModel :: IO model
-  , writeModel :: model -> IO ()
   , stateModel :: forall a. (model -> (a, model)) -> IO a
   }
 
@@ -119,74 +128,39 @@ data ModelAccess model = ModelAccess
 noWidget :: WidgetId
 noWidget = WidgetId 0
 
--- | The wake time that asks for no frame.
-noWake :: Double
-noWake = 1 / 0
-
 -- | A brand-new context: the embedded font at scale 1, the dark theme, and
 -- a clipboard that holds nothing, seeded with the application's model.
 newContext :: model -> IO (Context model)
 newContext initial = do
   modelRef <- newIORef initial
-  let model = ModelAccess (readIORef modelRef) (writeIORef modelRef) $ \f ->
+  let ctxModel = ModelAccess (readIORef modelRef) $ \f ->
         atomicModifyIORef' modelRef $ \current ->
           let (result, next) = f current in (next, result)
-  font0 <- newFont embeddedFont
-  font <- newIORef font0
-  scaleOverride <- newIORef 0
-  popup <- newIORef Nothing
-  blocked <- newIORef False
-  theme <- newIORef defaultTheme
-  input <- newIORef emptyInput
-  store <- newIORef emptyWidgetStore
-  rects <- newRectTable >>= newIORef
-  focus <- newIORef noWidget
-  focusReq <- newIORef False
-  focusables <- newIORef []
-  typing <- newIORef False
-  active <- newIORef noWidget
-  cursor <- newIORef UiCursorDefault
-  time <- newIORef 0
-  quit <- newIORef False
-  frameReq <- newIORef False
-  wakeAt <- newIORef noWake
-  arena <- newDrawArena
-  layout <- newIORef freshLayout
-  idPath <- newIORef initialIdPath
-  idSib <- newIORef 0
-  images <- newIORef mempty
-  clipGet <- newIORef (pure Nothing)
-  clipPut <- newIORef (\_ -> pure ())
-  pure
-    Context
-      { ctxModel = model
-       , ctxFont = font
-       , ctxScaleOverride = scaleOverride
-       , ctxPopup = popup
-       , ctxInputBlocked = blocked
-      , ctxTheme = theme
-      , ctxInput = input
-      , ctxStore = store
-      , ctxRects = rects
-      , ctxFocus = focus
-      , ctxFocusRequested = focusReq
-      , ctxFocusables = focusables
-      , ctxTyping = typing
-      , ctxActive = active
-      , ctxCursor = cursor
-      , ctxTime = time
-      , ctxQuit = quit
-      , ctxFrameRequest = frameReq
-      , ctxWakeAt = wakeAt
-
-       , ctxArena = arena
-       , ctxLayout = layout
-       , ctxIdPath = idPath
-       , ctxIdSib = idSib
-       , ctxImages = images
-      , ctxClipboardGet = clipGet
-      , ctxClipboardPut = clipPut
-      }
+  ctxFont <- newIORef =<< newFont embeddedFont
+  ctxScaleOverride <- newIORef 0
+  ctxPopup <- newIORef Nothing
+  ctxInputBlocked <- newIORef False
+  ctxTheme <- newIORef defaultTheme
+  ctxInput <- newIORef emptyInput
+  ctxStore <- newIORef emptyWidgetStore
+  ctxRects <- newIORef =<< newRectTable
+  ctxFocus <- newIORef noWidget
+  ctxFocusRequested <- newIORef False
+  ctxFocusables <- newIORef []
+  ctxTyping <- newIORef False
+  ctxActive <- newIORef noWidget
+  ctxCursor <- newIORef UiCursorDefault
+  ctxTime <- newIORef 0
+  ctxQuit <- newIORef False
+  ctxWake <- newIORef WakeIdle
+  ctxArena <- newDrawArena
+  ctxLayout <- newIORef freshLayout
+  ctxIdPath <- newIORef initialIdPath
+  ctxIdSib <- newIORef 0
+  ctxImages <- newIORef mempty
+  ctxClipboardGet <- newIORef (pure Nothing)
+  ctxClipboardPut <- newIORef (\_ -> pure ())
+  pure Context {..}
 
 -- | Replace the theme. The next frame draws with it.
 setTheme :: Context model -> Theme -> IO ()
@@ -218,11 +192,3 @@ contextInput = readIORef . ctxInput
 -- | Recorded widget geometry for hosts and tests.
 frameRects :: Context model -> IO [(Int, Rect)]
 frameRects ctx = readIORef (ctxRects ctx) >>= rectTableToList
-
--- | The system clipboard's text, if it holds any.
-readClipboard :: Context model -> IO (Maybe Text)
-readClipboard ctx = join (readIORef (ctxClipboardGet ctx))
-
--- | Replace the system clipboard's text.
-writeClipboard :: Context model -> Text -> IO ()
-writeClipboard ctx t = join (flip ($!) t <$> readIORef (ctxClipboardPut ctx))

@@ -7,7 +7,10 @@
 -- 'renderFrameGl'.
 --
 -- Frames draw into a retained framebuffer and a present copies it to the
--- window. The frame's 'Damage' decides how much of that buffer to touch:
+-- window. The renderer keeps a snapshot of the frame its vertex buffer
+-- holds and diffs each new frame against it: the diff's 'Upload' says how
+-- much geometry to send, and its 'Damage' how much of the framebuffer to
+-- touch:
 -- a damage-free frame presents without drawing, a few rectangles are
 -- cleared and repainted scissored to the damage, and a full frame is the
 -- whole clear-and-draw as before.
@@ -30,7 +33,7 @@ import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, nullPtr)
 import ChibiUI.Internal.Context (ImageEntry (..))
-import ChibiUI.Internal.Damage (Damage (..), commandQuadBounds)
+import ChibiUI.Internal.Damage (Damage (..), FrameSnapshot, Upload (..), trackUploads)
 import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Font
 import ChibiUI.Internal.Types
@@ -81,8 +84,9 @@ data GlRenderer = GlRenderer
   { glHandle :: !(Ptr ChibiUiGl)
   , glImages :: !(IORef (IM.IntMap Int))
   -- ^ Per image id, the version last uploaded.
-  , glVertexCount :: !(IORef Int)
-  -- ^ The vertex count last uploaded; -1 before the first upload.
+  , glSnapshot :: !(IORef (Maybe FrameSnapshot))
+  -- ^ The frame the vertex buffer holds, to diff the next one against;
+  -- 'Nothing' before the first upload.
   , glFrameSize :: !(IORef (Int, Int))
   -- ^ The framebuffer size of the last drawn frame. A size change
   -- recreates the retained texture, discarding its pixels, so it forces a
@@ -95,7 +99,7 @@ newGlRenderer = do
   h <- c_create
   when (h == nullPtr) $
     fail "chibi-ui: OpenGL renderer setup failed (needs an OpenGL 3.2 core context)"
-  GlRenderer h <$> newIORef IM.empty <*> newIORef (-1) <*> newIORef (0, 0)
+  GlRenderer h <$> newIORef IM.empty <*> newIORef Nothing <*> newIORef (0, 0)
 
 -- | Release the GPU objects (the context must still be current).
 freeGlRenderer :: GlRenderer -> IO ()
@@ -103,17 +107,17 @@ freeGlRenderer r = c_destroy (glHandle r)
 
 -- | Draw a frame into the retained framebuffer and copy it to the window's
 -- back buffer; the caller swaps. @scale@ is device pixels per logical
--- pixel and must match the scale the font rasterizes at. The @damage@ the
--- caller tracked against the last frame decides the work: nothing, the
--- damaged rectangles, or everything. A new atlas, new image versions and a
--- framebuffer size change repaint in full; glyphs added to the atlas do
--- not, as they only fill texels no quad sampled before. @changed@
--- lists the quads that differ from the last frame drawn, when the quad
--- count held ('snapshotChangedQuads'); only those are uploaded.
-renderFrameGl :: GlRenderer -> Font -> IM.IntMap ImageEntry -> Float -> Int -> Int -> Color -> DrawData -> Damage -> Maybe [Int] -> IO ()
-renderFrameGl r font images !scale !fbW !fbH bg drawData damage changed = do
+-- pixel and must match the scale the font rasterizes at, and @window@ is
+-- the frame's logical size. The frame's damage against the last one drawn
+-- decides the work: nothing, the damaged rectangles, or everything. A new
+-- atlas, new image versions and a framebuffer size change repaint in full;
+-- glyphs added to the atlas do not, as they only fill texels no quad
+-- sampled before. Only the quads that changed are uploaded.
+renderFrameGl :: GlRenderer -> Font -> IM.IntMap ImageEntry -> Float -> Int -> Int -> Color -> Size -> DrawData -> IO ()
+renderFrameGl r font images !scale !fbW !fbH bg window drawData = do
   let !h = glHandle r
       (!bgR, !bgG, !bgB, _) = colorFloats bg
+  (damage, upload) <- trackUploads (glSnapshot r) window drawData
   atlasChanged <- syncFontAtlasGl r font
   imagesChanged <- uploadImagesGl r images
   lastSize <- readIORef (glFrameSize r)
@@ -123,24 +127,22 @@ renderFrameGl r font images !scale !fbW !fbH bg drawData damage changed = do
     else do
       began <- c_begin h (fromIntegral fbW) (fromIntegral fbH) scale bgR bgG bgB (if full then 1 else 0)
       when (began == 0) $ fail "chibi-ui: retained framebuffer setup failed"
-      uploadGeometry r drawData changed
+      uploadGeometry h drawData upload
       case damage of
         DamageRects rs | not full -> drawDamaged h scale fbW fbH drawData rs bgR bgG bgB
         _ -> mapM_ (drawCmd h (0, 0, fbW, fbH)) (drawCommands drawData)
       c_present h
   writeIORef (glFrameSize r) (fbW, fbH)
 
--- | Hand the frame's vertices to the GPU: only the changed quads, in runs,
--- when the buffer holds the last frame at the same count, else everything.
-uploadGeometry :: GlRenderer -> DrawData -> Maybe [Int] -> IO ()
-uploadGeometry r drawData changed = do
-  let n = drawVertexCount drawData
-  uploaded <- readIORef (glVertexCount r)
-  withForeignPtr (drawVertices drawData) $ \vp -> case changed of
-    Just qs | n == uploaded ->
-      forM_ (quadRuns qs) $ \(q, k) -> c_uploadQuads (glHandle r) vp (fromIntegral q) (fromIntegral k)
-    _ -> c_uploadGeometry (glHandle r) vp (fromIntegral n)
-  writeIORef (glVertexCount r) n
+-- | Hand the frame's vertices to the GPU, as the diff against the frame
+-- the buffer holds asks: nothing, the changed quads in runs, or all.
+uploadGeometry :: Ptr ChibiUiGl -> DrawData -> Upload -> IO ()
+uploadGeometry h drawData upload =
+  withForeignPtr (drawVertices drawData) $ \vp -> case upload of
+    UploadNone -> pure ()
+    UploadQuads qs ->
+      forM_ (quadRuns qs) $ \(q, k) -> c_uploadQuads h vp (fromIntegral q) (fromIntegral k)
+    UploadAll -> c_uploadGeometry h vp (fromIntegral (drawVertexCount drawData))
 
 -- | Ascending quad indices as runs of @(first, count)@.
 quadRuns :: [Int] -> [(Int, Int)]
@@ -164,16 +166,16 @@ drawCmd h (x0, y0, x1, y1) cmd =
       (cmdQuadCount cmd)
       (fromIntegral (cmdTextureId cmd))
 
--- | Clear the damaged rectangles, then redraw each command whose quads
--- meet one, scissored to it, into the still-retained pixels around it.
+-- | Clear the damaged rectangles, then redraw every command scissored to
+-- each, into the still-retained pixels around it. Flat shapes and text
+-- share one batch, so a command nearly always spans the damage anyway;
+-- the scissor discards the rest on the GPU.
 drawDamaged :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> [Rect] -> Float -> Float -> Float -> IO ()
 drawDamaged h !scale !fbW !fbH drawData rects bgR bgG bgB = do
-  let boxes = [(dmg, box) | dmg <- rects, Just box <- [physClip scale fbW fbH dmg]]
-  forM_ boxes $ \(_, (x0, y0, x1, y1)) ->
+  let boxes = [box | dmg <- rects, Just box <- [physClip scale fbW fbH dmg]]
+  forM_ boxes $ \(x0, y0, x1, y1) ->
     c_clearRegion h (fromIntegral x0) (fromIntegral y0) (fromIntegral x1) (fromIntegral y1) bgR bgG bgB
-  forM_ (drawCommands drawData) $ \cmd -> do
-    bounds <- commandQuadBounds drawData cmd
-    forM_ boxes $ \(dmg, box) -> when (rectsOverlap bounds dmg) (drawCmd h box cmd)
+  forM_ (drawCommands drawData) $ \cmd -> forM_ boxes $ \box -> drawCmd h box cmd
 
 -- | The retained frame's pixels, RGBA rows bottom row first. For debugging
 -- what a frame drew.

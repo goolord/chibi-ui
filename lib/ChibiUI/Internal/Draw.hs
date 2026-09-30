@@ -1,3 +1,6 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# OPTIONS_GHC -Wno-name-shadowing #-}
+
 -- | The draw list: widgets emit quads into a growable vertex buffer,
 -- batched into commands that share a texture. Every quad is cut to the
 -- current clip as it is emitted, so commands carry no clip and the
@@ -105,33 +108,21 @@ data DrawArena = DrawArena
   -- far. A count of zero means no batch is open.
   }
 
--- | A brand-new arena.
+-- | A brand-new arena, empty as 'resetDrawArena' leaves one.
 newDrawArena :: IO DrawArena
 newDrawArena = do
   vbuf <- newBuffer 0
-  vptr <- withForeignPtr vbuf (newIORef . castPtr)
-  vref <- newIORef vbuf
-  vcap <- newIORef 0
-  vcnt <- newURef 0
-  cref <- newIORef []
-  lcref <- newIORef infiniteClip
-  cstack <- newIORef []
-  btex <- newIORef texAtlas
-  bstart <- newURef 0
-  bcount <- newURef 0
-  pure
-    DrawArena
-      { daVertex = vref
-      , daVertexPtr = vptr
-      , daVertexCap = vcap
-      , daVertexCount = vcnt
-      , daCommands = cref
-      , daLastClip = lcref
-      , daClipStack = cstack
-      , daBatchTexture = btex
-      , daBatchStart = bstart
-      , daBatchCount = bcount
-      }
+  daVertexPtr <- withForeignPtr vbuf (newIORef . castPtr)
+  daVertex <- newIORef vbuf
+  daVertexCap <- newIORef 0
+  daVertexCount <- newURef 0
+  daCommands <- newIORef []
+  daLastClip <- newIORef infiniteClip
+  daClipStack <- newIORef []
+  daBatchTexture <- newIORef texAtlas
+  daBatchStart <- newURef 0
+  daBatchCount <- newURef 0
+  pure DrawArena {..}
 
 newBuffer :: Int -> IO (ForeignPtr Word8)
 newBuffer = mallocForeignPtrBytes . max 1

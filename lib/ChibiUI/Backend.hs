@@ -21,7 +21,8 @@ module ChibiUI.Backend
   , takeSnapshot
   , frameDamage
   , trackFrame
-  , snapshotChangedQuads
+  , trackUploads
+  , Upload (..)
   , DrawData (..)
   , DrawCmd (..)
   , texAtlas
@@ -53,7 +54,7 @@ module ChibiUI.Backend
   ) where
 
 import ChibiUI.Internal.Context
-import ChibiUI.Internal.Damage (Damage (..), FrameSnapshot, frameDamage, snapshotChangedQuads, takeSnapshot, trackFrame)
+import ChibiUI.Internal.Damage (Damage (..), FrameSnapshot, Upload (..), frameDamage, takeSnapshot, trackFrame, trackUploads)
 import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), texAtlas, texImage)
 import ChibiUI.Internal.Font (Font, embeddedFont, fontFree, fontSetScale, newFont)
 import ChibiUI.Internal.Frame (runFrame)
