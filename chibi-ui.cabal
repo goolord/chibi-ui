@@ -1,0 +1,118 @@
+cabal-version:      3.4
+name:               chibi-ui
+version:            0.1.0.0
+synopsis:           A tiny immediate-mode GUI toolkit for Haskell, on RGFW
+description:
+    An immediate-mode GUI with a cursor layout: widgets are ordinary calls
+    placed at an advancing cursor, and there is no constraint solver. The
+    only backend is RGFW with OpenGL 3.2, text is rasterized by the bundled
+    RFont (stb_truetype) from an embedded TrueType Inter subset, and the
+    widgets are the primitive ones: text, text and number fields, images,
+    and basic tables.
+license:            MIT
+license-file:       LICENSE
+author:             goolord
+maintainer:         zacharyachurchill@gmail.com
+homepage:           https://github.com/goolord/chibi-ui
+bug-reports:        https://github.com/goolord/chibi-ui/issues
+category:           Graphics
+build-type:         Simple
+extra-doc-files:
+    CHANGELOG.md
+    README.md
+
+extra-source-files: data/inter.ttf
+
+source-repository head
+    type:     git
+    location: https://github.com/goolord/chibi-ui.git
+
+common extensions
+    default-language: GHC2024
+    default-extensions:
+        OverloadedStrings
+
+common warnings
+    ghc-options:
+        -Wall
+        -Wextra
+        -Wcompat
+        -Widentities
+        -Wincomplete-record-updates
+        -Wincomplete-uni-patterns
+        -Wmissing-export-lists
+        -Wmissing-home-modules
+        -Wpartial-fields
+        -Wredundant-constraints
+        -Wunused-packages
+
+library
+    import:           extensions
+    import:           warnings
+    exposed-modules:
+        ChibiUI
+        ChibiUI.Backend
+        ChibiUI.Backend.Rgfw
+    other-modules:
+        ChibiUI.Internal.Context
+        ChibiUI.Internal.Draw
+        ChibiUI.Internal.Editor
+        ChibiUI.Internal.Menu
+        ChibiUI.Internal.Font
+        ChibiUI.Internal.Frame
+        ChibiUI.Internal.Id
+        ChibiUI.Internal.Input
+        ChibiUI.Internal.Layout
+        ChibiUI.Internal.Monad
+        ChibiUI.Internal.Store
+        ChibiUI.Internal.Style
+        ChibiUI.Internal.Types
+        ChibiUI.Internal.Widgets
+        ChibiUI.Rgfw.Internal.Gl
+        ChibiUI.Rgfw.Internal.Session
+        RGFW
+        RGFW.Raw
+    hs-source-dirs:   lib
+    include-dirs:     cbits
+    install-includes: RGFW.h
+    c-sources:
+        cbits/RGFW.c
+        cbits/chibi_rfont.c
+        cbits/chibi_ui_gl.c
+    build-tool-depends: hsc2hs:hsc2hs
+    build-depends:
+        base >=4.20 && <4.23,
+        bytestring ^>=0.12,
+        containers >=0.7 && <0.9,
+        file-embed ^>=0.0.16,
+        mtl ^>=2.3,
+        text ^>=2.1
+    if os(windows)
+        extra-libraries: gdi32 user32 shell32
+    elif os(osx)
+        frameworks: Cocoa
+    else
+        extra-libraries: X11 Xcursor Xrandr Xi
+
+executable chibi-ui-demo
+    import:           extensions
+    import:           warnings
+    main-is:          Demo.hs
+    hs-source-dirs:   examples
+    build-depends:
+        base >=4.20 && <4.23,
+        bytestring ^>=0.12,
+        chibi-ui,
+        text ^>=2.1
+    ghc-options:      -threaded
+
+test-suite chibi-ui-test
+    import:           extensions
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    hs-source-dirs:   test
+    build-depends:
+        base >=4.20 && <4.23,
+        chibi-ui,
+        text ^>=2.1

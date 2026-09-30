@@ -1,0 +1,126 @@
+-- | One flat, window-clamped context menu, painted after the normal view.
+module ChibiUI.Internal.Menu
+  ( contextMenu, openContextMenu, processPopup, paintPopup ) where
+
+import Control.Monad (forM_, when)
+import Data.IORef
+import qualified Data.IntMap.Strict as IM
+import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
+import Data.Text (Text)
+import ChibiUI.Internal.Context (Context (..), Popup (..), noWidget)
+import ChibiUI.Internal.Font (lineHeight)
+import ChibiUI.Internal.Id (WidgetId)
+import ChibiUI.Internal.Input
+import ChibiUI.Internal.Layout (lsLast)
+import ChibiUI.Internal.Monad
+import ChibiUI.Internal.Style
+import ChibiUI.Internal.Types
+
+-- | Attach a right-click menu to the preceding widget or group. Actions
+-- should update application state, rather than declare more widgets.
+contextMenu :: [(Text, ChibiUI model ())] -> ChibiUI model ()
+contextMenu items = do
+  wid <- nextId
+  ctx <- askContext
+  r <- liftIO (lsLast <$> readIORef (ctxLayout ctx))
+  recordRect wid r
+  openContextMenu wid r [(t, True, action) | (t, action) <- items]
+
+openContextMenu :: WidgetId -> Rect -> [(Text, Bool, ChibiUI model ())] -> ChibiUI model ()
+openContextMenu wid r items = do
+  ctx <- askContext
+  inp <- getInput
+  hov <- hovered r
+  focus <- liftIO (readIORef (ctxFocus ctx))
+  focusRect <- liftIO (IM.lookup (slotOf focus) <$> readIORef (ctxRects ctx))
+  let focused = focus == wid || (focus /= noWidget && focusRect == Just r)
+  let keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
+  when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $ do
+    let position = if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp
+        actions = [(t, enabled, runChibiUI ctx action) | (t, enabled, action) <- items]
+        selected = fromMaybe (-1) (listToMaybe [i | (i, (_, True, _)) <- zip [0 ..] items])
+    liftIO $ do
+      writeIORef (ctxPopup ctx) (Just (Popup wid position actions selected (inputMousePos inp)))
+      writeIORef (ctxActive ctx) noWidget
+      writeIORef (ctxInputBlocked ctx) True
+    requestFrame
+
+geometry :: Popup -> ChibiUI model (Rect, Float)
+geometry popup = do
+  Size w h <- windowSize
+  widths <- mapM (measureText . (\(t, _, _) -> t)) (popupItems popup)
+  let V2 x y = popupPosition popup
+      width = min w (maximum (120 : map (+ 20) widths))
+      rowH = min (lineHeight + 10) (max 0 ((h - 2) / fromIntegral (length widths)))
+      height = min h (2 + rowH * fromIntegral (length widths))
+  pure (Rect (clamp 0 (max 0 (w - width)) x) (clamp 0 (max 0 (h - height)) y) width height, rowH)
+
+rowAt :: Rect -> Float -> Input -> Maybe Int
+rowAt r height inp
+  | height > 0 && rectHit (r {rectY = rectY r + 1, rectH = max 0 (rectH r - 2)}) (inputMousePos inp) =
+      Just (floor ((v2Y (inputMousePos inp) - rectY r - 1) / height))
+  | otherwise = Nothing
+
+-- | Consume the menu's input before widgets see it, including dismissal.
+processPopup :: ChibiUI model Bool
+processPopup = do
+  ctx <- askContext
+  current <- liftIO (readIORef (ctxPopup ctx))
+  case current of
+    Nothing -> pure False
+    Just popup -> do
+      inp <- getInput
+      (r, rowH) <- geometry popup
+      let (next, action) = stepPopup inp (rowAt r rowH inp) popup
+      liftIO (writeIORef (ctxPopup ctx) next >> sequence_ action)
+      when (isNothing next) requestFrame
+      pure True
+
+-- | Decide the next popup and deferred action without running either effect.
+stepPopup :: Input -> Maybe Int -> Popup -> (Maybe Popup, Maybe (IO ()))
+stepPopup inp pointerRow popup = (next, action)
+  where
+    enabled = [(i, run) | (i, (_, True, run)) <- zip [0 ..] (popupItems popup)]
+    indices = map fst enabled
+    first = fromMaybe (-1) . listToMaybe
+    step backwards =
+      let order = if backwards then reverse indices else indices
+          beyond = if backwards then (< popupSelected popup) else (> popupSelected popup)
+       in first (filter beyond order ++ order)
+    selected | pressedIn KeyDown inp = step False
+             | pressedIn KeyUp inp = step True
+             | pressedIn KeyHome inp = first indices
+             | pressedIn KeyEnd inp = first (reverse indices)
+             | inputMousePos inp /= popupPointer popup,
+               Just i <- pointerRow, i `elem` indices = i
+             | otherwise = popupSelected popup
+    clicked = pressedIn MouseLeft inp
+    chosen | clicked = pointerRow
+           | pressedIn KeyEnter inp = Just selected
+           | otherwise = Nothing
+    action = chosen >>= (`lookup` enabled)
+    dismiss = clicked || pressedIn MouseRight inp || any (`pressedIn` inp) [KeyEscape, KeyTab]
+    next | dismiss || isJust action = Nothing
+         | otherwise = Just popup {popupSelected = selected, popupPointer = inputMousePos inp}
+
+paintPopup :: Input -> ChibiUI model ()
+paintPopup inp = do
+  ctx <- askContext
+  current <- liftIO (readIORef (ctxPopup ctx))
+  forM_ current $ \popup -> do
+    exists <- liftIO (IM.member (slotOf (popupOwner popup)) <$> readIORef (ctxRects ctx))
+    if not exists
+      then liftIO (writeIORef (ctxPopup ctx) Nothing)
+      else do
+        (r, rowH) <- geometry popup
+        th <- theme
+        withClip r $ do
+          fillRectUI r (themeSurface th)
+          forM_ (zip [0 ..] (popupItems popup)) $ \(i, (title, enabled, _)) -> do
+            let rr = Rect (rectX r + 1) (rectY r + 1 + fromIntegral i * rowH) (max 0 (rectW r - 2)) rowH
+                active = enabled && popupSelected popup == i
+            when active (fillRectUI rr (themeSurfaceActive th))
+            drawTextIn (rr {rectX = rectX rr + 8, rectW = max 0 (rectW rr - 16)}) title
+              (if enabled then themeText th else themeTextDim th)
+          strokeRectUI r 1 (themeBorder th)
+        wantCursor (if rectHit r (inputMousePos inp) then UiCursorPointer else UiCursorDefault)
