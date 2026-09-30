@@ -6,8 +6,10 @@
 -- the coverage atlas the font rasterizes into, synced by 'renderFrameGl'.
 --
 -- Frames draw into a retained framebuffer and a present copies it to the
--- window. Chibi-ui repaints every frame in full, so the retained buffer
--- only saves the swap from reading the frame back.
+-- window. The frame's 'Damage' decides how much of that buffer to touch:
+-- a damage-free frame presents without drawing, a few rectangles are
+-- cleared and repainted scissored to the damage, and a full frame is the
+-- whole clear-and-draw as before.
 module ChibiUI.Rgfw.Internal.Gl
   ( GlRenderer
   , newGlRenderer
@@ -17,7 +19,7 @@ module ChibiUI.Rgfw.Internal.Gl
   , readRetainedPixels
   ) where
 
-import Control.Monad (forM_, when, void)
+import Control.Monad (forM, forM_, when)
 import Data.Bits (shiftR, (.&.))
 import Data.IORef
 import Data.Int (Int32)
@@ -29,6 +31,7 @@ import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, nullPtr)
 import ChibiUI.Internal.Context (ImageEntry (..))
+import ChibiUI.Internal.Damage (Damage (..), commandQuadBounds)
 import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Font
 import ChibiUI.Internal.Types
@@ -63,6 +66,9 @@ foreign import ccall unsafe "chibi_ui_gl_upload_geometry"
 foreign import ccall unsafe "chibi_ui_gl_draw_geometry"
   c_drawGeometry :: Ptr ChibiUiGl -> Int32 -> Int32 -> Int32 -> Int32 -> Word32 -> Word32 -> Int32 -> IO ()
 
+foreign import ccall unsafe "chibi_ui_gl_clear_region"
+  c_clearRegion :: Ptr ChibiUiGl -> Int32 -> Int32 -> Int32 -> Int32 -> Float -> Float -> Float -> IO ()
+
 -- | GPU resources and the font/image sync state owned by one OpenGL
 -- context. Release with 'freeGlRenderer' while that context is still
 -- current.
@@ -72,6 +78,10 @@ data GlRenderer = GlRenderer
   -- ^ The atlas size last uploaded, to detect resizes.
   , glImages :: !(IORef (IM.IntMap Int))
   -- ^ Per image id, the version last uploaded.
+  , glFrameSize :: !(IORef (Int, Int))
+  -- ^ The framebuffer size of the last drawn frame. A size change
+  -- recreates the retained texture, discarding its pixels, so it forces a
+  -- full frame.
   }
 
 -- | Build the renderer on the calling thread's current OpenGL context.
@@ -80,22 +90,46 @@ newGlRenderer = do
   h <- c_create
   when (h == nullPtr) $
     fail "chibi-ui: OpenGL renderer setup failed (needs an OpenGL 3.2 core context)"
-  GlRenderer h <$> newIORef (0, 0) <*> newIORef IM.empty
+  GlRenderer h <$> newIORef (0, 0) <*> newIORef IM.empty <*> newIORef (0, 0)
 
 -- | Release the GPU objects (the context must still be current).
 freeGlRenderer :: GlRenderer -> IO ()
 freeGlRenderer r = c_destroy (glHandle r)
 
--- | Draw a frame in full and copy it to the window's back buffer. The
--- caller swaps. @scale@ is device pixels per logical pixel and must match
--- the scale the font rasterizes at.
-renderFrameGl :: GlRenderer -> Font -> Float -> Int -> Int -> Color -> DrawData -> IO ()
-renderFrameGl r font !scale !fbW !fbH bg drawData = do
+-- | Draw a frame into the retained framebuffer and copy it to the window's
+-- back buffer; the caller swaps. @scale@ is device pixels per logical
+-- pixel and must match the scale the font rasterizes at. The @damage@ the
+-- caller tracked against the last frame decides the work: nothing, the
+-- damaged rectangles, or everything. An atlas upload or a framebuffer size
+-- change upgrades the damage to a full frame.
+renderFrameGl :: GlRenderer -> Font -> Float -> Int -> Int -> Color -> DrawData -> Damage -> IO ()
+renderFrameGl r font !scale !fbW !fbH bg drawData damage = do
   let !h = glHandle r
       (!bgR, !bgG, !bgB, _) = colorFloats bg
-  began <- c_begin h (fromIntegral fbW) (fromIntegral fbH) scale bgR bgG bgB 1
-  when (began == 0) $ fail "chibi-ui: retained framebuffer setup failed"
-  syncFontAtlasGl r font
+  atlasChanged <- syncFontAtlasGl r font
+  lastSize <- readIORef (glFrameSize r)
+  let !sizeChanged = lastSize /= (fbW, fbH)
+      !full = atlasChanged || sizeChanged || damage == DamageFull
+  if damage == DamageNone && not full
+    then c_present h
+    else do
+      began <- c_begin h (fromIntegral fbW) (fromIntegral fbH) scale bgR bgG bgB (if full then 1 else 0)
+      when (began == 0) $ fail "chibi-ui: retained framebuffer setup failed"
+      uploadGeometry h drawData
+      if full
+        then drawAllCommands h scale fbW fbH drawData
+        else case damage of
+          DamageRects rs -> drawDamagedCommands h scale fbW fbH drawData rs bgR bgG bgB
+          -- Unreachable: damage-free frames present above, unless an atlas
+          -- or size change forced a full frame.
+          _ -> drawAllCommands h scale fbW fbH drawData
+      c_present h
+  writeIORef (glFrameSize r) (fbW, fbH)
+
+-- | Hand the frame's buffers to the GPU. Partial and full frames alike
+-- upload everything; the draws below pick what to rasterize.
+uploadGeometry :: Ptr ChibiUiGl -> DrawData -> IO ()
+uploadGeometry h drawData =
   withForeignPtr (drawVertices drawData) $ \vp ->
     withForeignPtr (drawIndices drawData) $ \ip ->
       c_uploadGeometry
@@ -104,9 +138,13 @@ renderFrameGl r font !scale !fbW !fbH bg drawData = do
         (fromIntegral (drawVertexCount drawData))
         ip
         (fromIntegral (drawIndexCount drawData))
+
+-- | Every command under its own clip: the whole-frame repaint.
+drawAllCommands :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> IO ()
+drawAllCommands h !scale !fbW !fbH drawData =
   forM_ (drawCommands drawData) $ \cmd ->
     when (cmdIndexCount cmd >= 3) $
-      case physClip scale fbW fbH (Rect (cmdClipX cmd) (cmdClipY cmd) (cmdClipW cmd) (cmdClipH cmd)) of
+      case physClip scale fbW fbH (cmdRectOf cmd) of
         Nothing -> pure ()
         Just (x0, y0, x1, y1) ->
           c_drawGeometry
@@ -118,7 +156,33 @@ renderFrameGl r font !scale !fbW !fbH bg drawData = do
             (cmdIndexOffset cmd)
             (cmdIndexCount cmd)
             (fromIntegral (cmdTextureId cmd))
-  c_present h
+
+-- | Clear the damaged rectangles, then redraw each command that intersects
+-- one, scissored to the overlap, into the still-retained pixels around it.
+drawDamagedCommands :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> [Rect] -> Float -> Float -> Float -> IO ()
+drawDamagedCommands h !scale !fbW !fbH drawData rects bgR bgG bgB = do
+  forM_ rects $ \dmg ->
+    case physClip scale fbW fbH dmg of
+      Nothing -> pure ()
+      Just (x0, y0, x1, y1) ->
+        c_clearRegion h (fromIntegral x0) (fromIntegral y0) (fromIntegral x1) (fromIntegral y1) bgR bgG bgB
+  forM_ (drawCommands drawData) $ \cmd ->
+    when (cmdIndexCount cmd >= 3) $ do
+      bounds <- commandQuadBounds drawData cmd
+      forM_ rects $ \dmg ->
+        when (rectsOverlap bounds dmg) $
+          case physClip scale fbW fbH =<< rectIntersect (cmdRectOf cmd) dmg of
+            Nothing -> pure ()
+            Just (x0, y0, x1, y1) ->
+              c_drawGeometry
+                h
+                (fromIntegral x0)
+                (fromIntegral y0)
+                (fromIntegral x1)
+                (fromIntegral y1)
+                (cmdIndexOffset cmd)
+                (cmdIndexCount cmd)
+                (fromIntegral (cmdTextureId cmd))
 
 -- | The retained frame's pixels, RGBA rows bottom row first. For debugging
 -- what a frame drew.
@@ -126,23 +190,27 @@ readRetainedPixels :: GlRenderer -> Int -> Int -> IO BS.ByteString
 readRetainedPixels r w h = BSI.create (w * h * 4) (c_readRetained (glHandle r))
 
 -- | Upload the font's coverage atlas when glyphs were added since the last
--- sync, or when its size changed.
-syncFontAtlasGl :: GlRenderer -> Font -> IO ()
+-- sync, or when its size changed. Reports whether the texture changed, so
+-- callers can repaint in full: baked glyph positions may have moved.
+syncFontAtlasGl :: GlRenderer -> Font -> IO Bool
 syncFontAtlasGl r font = do
   dirty <- fontTakeDirty font
   lastWH <- readIORef (glAtlas r)
   atlasWH <- fontAtlasSize font
   if not (dirty || lastWH /= atlasWH)
-    then pure ()
+    then pure False
     else do
       let (w, h) = atlasWH
       pixels <- fontAtlasPixels font
       ok <- (/= 0) <$> c_uploadAtlas (glHandle r) pixels (fromIntegral w) (fromIntegral h)
       when ok (writeIORef (glAtlas r) atlasWH)
+      pure ok
 
 -- | Upload registered images whose version changed since the last sync.
--- Call before 'renderFrameGl' with the GL context current.
-uploadImagesGl :: GlRenderer -> IM.IntMap ImageEntry -> IO ()
+-- Reports whether any texture changed, so callers can repaint in full: the
+-- same quads sample different pixels. Call before 'renderFrameGl' with the
+-- GL context current.
+uploadImagesGl :: GlRenderer -> IM.IntMap ImageEntry -> IO Bool
 uploadImagesGl r images = do
   uploaded <- readIORef (glImages r)
   let changed =
@@ -150,16 +218,18 @@ uploadImagesGl r images = do
         | (img, e) <- IM.toList images
         , IM.lookup img uploaded /= Just (ieVersion e)
         ]
-  forM_ changed $ \(img, e) ->
-    BSU.unsafeUseAsCString (iePixels e) $ \p ->
-      void $
+  oks <- forM changed $ \(img, e) ->
+    BSU.unsafeUseAsCString (iePixels e) $ \p -> do
+      ok <-
         c_uploadImage
           (glHandle r)
           (fromIntegral img)
           (fromIntegral (ieWidth e))
           (fromIntegral (ieHeight e))
           (castPtr p)
+      pure (ok /= 0)
   writeIORef (glImages r) (IM.map ieVersion images `IM.union` uploaded)
+  pure (or oks)
 
 -- | Scale a logical clip rect to physical pixels and intersect it with a
 -- w x h target, as @(x0, y0, x1, y1)@ with exclusive ends; 'Nothing' if
@@ -181,3 +251,13 @@ colorFloats :: Color -> (Float, Float, Float, Float)
 colorFloats (Color w) = (chan 24, chan 16, chan 8, chan 0)
   where
     chan s = fromIntegral ((w `shiftR` s) .&. 0xFF) / 255
+
+-- | A command's clip rectangle in logical pixels.
+cmdRectOf :: DrawCmd -> Rect
+cmdRectOf cmd = Rect (cmdClipX cmd) (cmdClipY cmd) (cmdClipW cmd) (cmdClipH cmd)
+
+-- | Whether two rectangles share positive area.
+rectsOverlap :: Rect -> Rect -> Bool
+rectsOverlap a b = case rectIntersect a b of
+  Just _ -> True
+  Nothing -> False

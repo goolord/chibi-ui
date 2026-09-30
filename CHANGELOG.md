@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added rudimentary damage tracking. Each frame's draw list is diffed
+  against the previous one, quad by quad: a frame that changed nothing
+  presents without drawing, and a frame that changed a little repaints only
+  its rectangles into the retained framebuffer (cleared and redrawn
+  scissored). Structural changes, texture uploads, and resizes still paint
+  in full. `ChibiUI.Backend` exposes the `Damage` type and `trackFrame` for
+  headless hosts.
 - Added `textArea`, a multiline field sharing selection, clipboard, undo/redo,
   and context menus with text inputs, with line navigation and a scrollable viewport.
 - **Breaking:** views are now `ChibiUI model a`, with a user-defined application

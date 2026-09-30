@@ -3,8 +3,10 @@
 --
 -- The loop is simple: wait for events (or a short timeout while a field is
 -- focused, for the caret blink, or when a view asked for a frame), fold
--- the event batch into one 'Input', run the view, render in full, swap.
--- No damage tracking, no frame splitting.
+-- the event batch into one 'Input', run the view, and render. Rendering
+-- carries rudimentary damage tracking: the frame's draw list is diffed
+-- against the last one, so a frame that changed nothing presents without
+-- drawing and one that changed a little repaints only those rectangles.
 module ChibiUI.Rgfw.Internal.Session
   ( RgfwOptions (..)
   , defaultRgfwOptions
@@ -44,6 +46,7 @@ import ChibiUI.Internal.Context
   , setTheme
   , withClipboard
   )
+import ChibiUI.Internal.Damage (Damage (..), trackFrame)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
@@ -149,6 +152,7 @@ runChibiAppWith opts initial view = inBoundThread $
       now0 <- getMonotonicTime
       lastFrameRef <- newIORef now0
       statsRef <- newIORef (0 :: Int, 0 :: Int, 0 :: Int)
+      snapRef <- newIORef Nothing
       let syncCursor = do
             want <- readIORef (ctxCursor ctx)
             syncCursorKind cursorRef (R.showMouse win) (setIcon . mapRgfwCursor) want
@@ -190,14 +194,17 @@ runChibiAppWith opts initial view = inBoundThread $
             theme1 <- readIORef (ctxTheme ctx)
             (_, dd) <- runFrame ctx inp0 view
             images <- readIORef (ctxImages ctx)
-            uploadImagesGl renderer images
+            imagesChanged <- uploadImagesGl renderer images
+            damage0 <- trackFrame snapRef (inputWindowSize inp0) dd
+            -- New texture contents repaint the same quads differently.
+            let damage = if imagesChanged then DamageFull else damage0
             writeIORef
               statsRef
               ( drawVertexCount dd
               , length (drawCommands dd)
               , length [() | c <- drawCommands dd, cmdTextureId c == texGlyphAtlas]
               )
-            renderFrameGl renderer font scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd
+            renderFrameGl renderer font scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage
             R.swapBuffersGL win
             -- Clear one-shot events and stamp the timing of the frame that
             -- just ran onto the next one.

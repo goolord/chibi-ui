@@ -55,6 +55,7 @@ library
         ChibiUI.Backend.Rgfw
     other-modules:
         ChibiUI.Internal.Context
+        ChibiUI.Internal.Damage
         ChibiUI.Internal.Draw
         ChibiUI.Internal.Editor
         ChibiUI.Internal.Menu

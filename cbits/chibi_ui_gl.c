@@ -439,6 +439,21 @@ int32_t chibi_ui_gl_begin(chibi_ui_gl* r, int32_t fbW, int32_t fbH, float scale,
   return 1;
 }
 
+/* Clear one rectangle of the retained framebuffer to the frame's clear
+ * colour, ahead of a partial repaint of that region: removed geometry
+ * would otherwise leave stale pixels, since partial frames do not clear.
+ * Coordinates are top-left physical pixels, already intersected with the
+ * framebuffer, like a draw call's scissor. */
+void chibi_ui_gl_clear_region(chibi_ui_gl* r, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
+                              float red, float green, float blue) {
+  ngl_api* gl = &r->gl;
+  gl->Enable(GL_SCISSOR_TEST);
+  gl->Scissor(x0, r->fbH - y1, x1 - x0, y1 - y0);
+  gl->ClearColor(red, green, blue, 1.0f);
+  gl->Clear(GL_COLOR_BUFFER_BIT);
+  gl->Disable(GL_SCISSOR_TEST);
+}
+
 /* Copy the retained frame to the window's back buffer. The caller swaps. */
 void chibi_ui_gl_present(chibi_ui_gl* r) {
   ngl_api* gl = &r->gl;

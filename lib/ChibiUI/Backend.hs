@@ -16,6 +16,11 @@ module ChibiUI.Backend
   , fontSetScale
   , fontFree
   , runFrame
+  , Damage (..)
+  , FrameSnapshot
+  , takeSnapshot
+  , frameDamage
+  , trackFrame
   , DrawData (..)
   , DrawCmd (..)
   , texFlat
@@ -49,6 +54,7 @@ module ChibiUI.Backend
   ) where
 
 import ChibiUI.Internal.Context
+import ChibiUI.Internal.Damage (Damage (..), FrameSnapshot, frameDamage, takeSnapshot, trackFrame)
 import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), texFlat, texGlyphAtlas, texImage)
 import ChibiUI.Internal.Font (Font, embeddedFont, fontFree, fontSetScale, newFont)
 import ChibiUI.Internal.Frame (runFrame)

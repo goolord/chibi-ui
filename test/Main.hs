@@ -35,6 +35,7 @@ main = do
   testLayoutCursor
   testScroll
   testDrawData
+  testDamage
   testFontScales
   testFieldClipping
   testFieldLifecycle
@@ -536,6 +537,46 @@ testDrawData = do
         )
         glyphStarts
   unless (null badUv) (fail ("draw data: glyph UVs out of the atlas at vertices " ++ show (take 3 badUv)))
+
+testDamage :: IO ()
+testDamage = do
+  ctx <- newTestContext
+  snapRef <- newIORef Nothing
+  let view = do
+        label "hello"
+        _ <- button "ok"
+        pure ()
+      step tweak = do
+        inp0 <- contextInput ctx
+        let inp = tweak (clearEphemeral inp0)
+        (_, dd) <- runFrame ctx inp view
+        trackFrame snapRef (inputWindowSize inp) dd
+      -- Whether small lies within big, with a pixel of slack.
+      within pad big small =
+        rectX small >= rectX big - pad
+          && rectY small >= rectY big - pad
+          && rectX small + rectW small <= rectX big + rectW big + pad
+          && rectY small + rectH small <= rectY big + rectH big + pad
+  -- The first frame owes everything.
+  d0 <- step id
+  assert "damage: the first frame is a full frame" (d0 == DamageFull)
+  -- An unchanged frame owes nothing: the host can idle.
+  d1 <- step id
+  assert "damage: an unchanged frame is damage-free" (d1 == DamageNone)
+  -- Hovering the button repaints only around the button.
+  rs <- readRects ctx
+  r <- bigRect rs
+  d2 <- step (at (rectX r + rectW r / 2) (rectY r + rectH r / 2))
+  ok2 <- case d2 of
+    DamageRects ds -> pure (not (null ds) && all (within 6 r) ds)
+    _ -> pure False
+  assert "damage: hover damage stays at the button" ok2
+  -- The hover holds: the next identical frame is damage-free again.
+  d3 <- step id
+  assert "damage: a held hover settles" (d3 == DamageNone)
+  -- A window resize relayouts everything: back to a full frame.
+  d4 <- step (\i -> i {inputWindowSize = Size 1024 768})
+  assert "damage: a resize is a full frame" (d4 == DamageFull)
 
 assert :: String -> Bool -> IO ()
 assert message ok = unless ok (fail message)
