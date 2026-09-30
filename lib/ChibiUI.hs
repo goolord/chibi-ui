@@ -68,6 +68,7 @@ module ChibiUI
   , intInput
   , floatInput
   , slider
+  , progressBar
   , image
   , useImageRgba
   , plotLines
@@ -183,6 +184,7 @@ import ChibiUI.Internal.Widgets
   , label
   , labelDim
   , plotLines
+  , progressBar
   , selectableText
   , scrollColumn
   , separator
