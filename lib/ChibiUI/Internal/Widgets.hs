@@ -5,6 +5,7 @@ module ChibiUI.Internal.Widgets
   , labelDim
   , selectableText
   , button
+  , checkbox
   , treeNode
   , textInput
   , textArea
@@ -70,6 +71,23 @@ button t = do
   frameBorder th r (iFocused i)
   textInRect r t (themeText th)
   pure (iClicked i)
+
+-- | A box with a caption beside it. Click it, or press Enter/Space while
+-- it is focused, to flip it; returns the value it now holds.
+checkbox :: Text -> Bool -> ChibiUI model Bool
+checkbox t value = do
+  (_, r, i) <- interactive clickable $ do
+    Size w h <- textSize t
+    pure (Size (h + widgetPad + w) (h + widgetPad * 2))
+  th <- theme
+  let checked = if iClicked i then not value else value
+      box = Rect (rectX r) (rectY r + widgetPad) lineHeight lineHeight
+      caption = lineHeight + widgetPad
+  fillRectUI box (surfaceFor th i)
+  frameBorder th box (iFocused i)
+  when checked (fillRectUI (rectInflate (-4) box) (themeAccent th))
+  drawTextIn (r {rectX = rectX r + caption, rectW = max 0 (rectW r - caption)}) t (themeText th)
+  pure checked
 
 -- | The surface under a widget: pressed, hovered, or at rest.
 surfaceFor :: Theme -> Interaction -> Color
