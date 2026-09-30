@@ -1,119 +1,95 @@
--- | Transient widget state, keyed by widget identity. Application state
--- lives separately in the context's user-defined model.
+-- | Transient widget state, keyed by widget identity, in one concretely
+-- typed map per kind of state. Application state lives separately in the
+-- context's model.
 module ChibiUI.Internal.Store
-  ( WidgetStore (..)
+  ( WidgetStore
   , emptyWidgetStore
-  , Field
-  , fieldInt
-  , fieldFloat
-  , fieldDyn
-  , lookupDyn
-  , findSlot
-  , memberSlot
-  , insertSlot
-  , deleteSlot
-  , Slot (..)
-  , slotKey
+  , StoreMap
+  , treeOpen
+  , tableSelection
+  , scrollRegions
+  , textFields
+  , lookupState
+  , writeState
+  -- * State
+  , ScrollState (..)
+  , FieldState (..)
+  , Draft (..)
+  , ClickState (..)
   ) where
 
-import Data.Dynamic (Dynamic, fromDynamic)
-import Data.Typeable (Typeable)
 import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
-import ChibiUI.Internal.Id (mix64)
+import Data.Text (Text)
+import ChibiUI.Internal.Editor (Command, Editor)
+import ChibiUI.Internal.Types (V2)
 
--- | Widget state for every widget, in maps by value type, keyed by
--- @fromIntegral (hashWidgetId wid)@. Same-type fields that share a widget
--- key use 'slotKey'.
+-- | Every widget's state, keyed by @fromIntegral (hashWidgetId wid)@. A
+-- widget has at most one entry, in the map for its kind.
 data WidgetStore = WidgetStore
-  { storeInt :: !(IntMap Int)
-  , storeFloat :: !(IntMap Float)
-  , storeDyn :: !(IntMap Dynamic)
+  { storeTreeOpen :: !(IntMap ())
+  , storeTableSelection :: !(IntMap Int)
+  , storeScroll :: !(IntMap ScrollState)
+  , storeTextField :: !(IntMap FieldState)
   }
 
--- | One of the store's maps: how to read it, and how to put a new one back.
--- The slot functions inline at the field they are given, so
--- @insertSlot fieldInt k v@ compiles to the record update it stands for.
-data Field a = Field (WidgetStore -> IntMap a) (IntMap a -> WidgetStore -> WidgetStore)
-
--- | Integer slots, for table selection.
-fieldInt :: Field Int
-fieldInt = Field storeInt (\m st -> st {storeInt = m})
-
--- | Single-precision numeric slots.
-fieldFloat :: Field Float
-fieldFloat = Field storeFloat (\m st -> st {storeFloat = m})
-
--- | Runtime-typed slots, for editor history, pointer clicks and queued commands.
-fieldDyn :: Field Dynamic
-fieldDyn = Field storeDyn (\m st -> st {storeDyn = m})
-
--- | Read the map selected by a field descriptor.
-{-# INLINE fieldMap #-}
-fieldMap :: Field a -> WidgetStore -> IntMap a
-fieldMap (Field get _) = get
-
--- | Pure update of one selected map.
-{-# INLINE overField #-}
-overField :: Field a -> (IntMap a -> IntMap a) -> WidgetStore -> WidgetStore
-overField (Field get set) f st = set (f (get st)) st
-
--- | Read a key from a typed map, returning 'Nothing' when absent.
-{-# INLINE lookupSlot #-}
-lookupSlot :: Field a -> Int -> WidgetStore -> Maybe a
-lookupSlot field k = IM.lookup k . fieldMap field
-
--- | A runtime-typed slot's value, when it holds one of the expected type.
-{-# INLINE lookupDyn #-}
-lookupDyn :: Typeable a => Int -> WidgetStore -> Maybe a
-lookupDyn k st = lookupSlot fieldDyn k st >>= fromDynamic
-
--- | The slot's value, or @def@ while it has none.
-{-# INLINE findSlot #-}
-findSlot :: Field a -> a -> Int -> WidgetStore -> a
-findSlot field def k = IM.findWithDefault def k . fieldMap field
-
--- | Whether a key exists in the selected map, regardless of its value.
-{-# INLINE memberSlot #-}
-memberSlot :: Field a -> Int -> WidgetStore -> Bool
-memberSlot field k = IM.member k . fieldMap field
-
--- | Pure insert or replacement.
-{-# INLINE insertSlot #-}
-insertSlot :: Field a -> Int -> a -> WidgetStore -> WidgetStore
-insertSlot field k v = overField field (IM.insert k v)
-
--- | Pure removal of a key; an absent key leaves the map unchanged.
-{-# INLINE deleteSlot #-}
-deleteSlot :: Field a -> Int -> WidgetStore -> WidgetStore
-deleteSlot field k = overField field (IM.delete k)
-
--- | Every built-in slot.
-data Slot
-  = -- | A scroll region's y offset.
-    SlotScrollY
-  | -- | A scroll region's content extent.
-    SlotScrollExtent
-  | -- | A table's selected row index, plus one; 0 is none.
-    SlotTableSel
-  | SlotTextScroll
-  | SlotTextClick
-  | SlotTextCommand
-  | SlotTreeOpen
-  | SlotTextScrollY
-  deriving (Enum)
-
--- | Tag for a built-in slot under one widget's key: the constructor index
--- mixed with a salt, so tags are well spread.
-{-# INLINE slotKey #-}
-slotKey :: Slot -> Int -> Int
-slotKey s k = fromIntegral (mix64 (fromIntegral k) (mix64 0x534C4F5454414753 (fromIntegral (fromEnum s))))
-
--- | Empty maps.
+-- | No widget has state.
 emptyWidgetStore :: WidgetStore
-emptyWidgetStore =
-  WidgetStore
-    { storeInt = IM.empty
-    , storeFloat = IM.empty
-    , storeDyn = IM.empty
-    }
+emptyWidgetStore = WidgetStore IM.empty IM.empty IM.empty IM.empty
+
+-- | One of the store's maps: how to read it, and how to put a new one back.
+-- The accessors inline at the map they are given, so a write compiles to
+-- the record update it stands for.
+data StoreMap a = StoreMap (WidgetStore -> IntMap a) (IntMap a -> WidgetStore -> WidgetStore)
+
+-- | The tree nodes that are open; a closed node has no entry.
+treeOpen :: StoreMap ()
+treeOpen = StoreMap storeTreeOpen (\m st -> st {storeTreeOpen = m})
+
+-- | Each table's selected row; a table with none has no entry.
+tableSelection :: StoreMap Int
+tableSelection = StoreMap storeTableSelection (\m st -> st {storeTableSelection = m})
+
+-- | Each scroll region's offset and body extent.
+scrollRegions :: StoreMap ScrollState
+scrollRegions = StoreMap storeScroll (\m st -> st {storeScroll = m})
+
+-- | Each text field's draft, scroll and pointer state.
+textFields :: StoreMap FieldState
+textFields = StoreMap storeTextField (\m st -> st {storeTextField = m})
+
+-- | A widget's entry in one map.
+{-# INLINE lookupState #-}
+lookupState :: StoreMap a -> Int -> WidgetStore -> Maybe a
+lookupState (StoreMap get _) k = IM.lookup k . get
+
+-- | Replace ('Just') or remove ('Nothing') a widget's entry in one map.
+{-# INLINE writeState #-}
+writeState :: StoreMap a -> Int -> Maybe a -> WidgetStore -> WidgetStore
+writeState (StoreMap get set) k v st = set (maybe (IM.delete k) (IM.insert k) v (get st)) st
+
+-- | A scroll region's offset, and the extent of its body when last run.
+data ScrollState = ScrollState !Float !Float
+  deriving (Eq)
+
+-- | What a text field keeps between frames.
+data FieldState = FieldState
+  { fieldDraft :: !Draft
+  , fieldScroll :: !V2
+  -- ^ How far the text is scrolled; back to the start when an edit ends.
+  , fieldClick :: !(Maybe ClickState)
+  -- ^ The last press, for counting double and triple clicks.
+  , fieldQueued :: !(Maybe Command)
+  -- ^ A command the field's menu chose, run on the next frame.
+  }
+  deriving (Eq)
+
+-- | An inactive editor retains undo history; an editing session also owns
+-- the focus-time value. The draft and its cancellation target cannot drift
+-- apart.
+data Draft = Inactive !Editor | Editing !Text !Editor
+  deriving (Eq)
+
+-- | A press on a text field: when, where, and how many presses in a row.
+data ClickState = ClickState !Double !V2 !Int
+  deriving (Eq)

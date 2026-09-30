@@ -18,9 +18,9 @@ module ChibiUI.Internal.Monad
   , nextId
   , scoped
   , withKey
-  -- * Store
-  , storeUpdate
-  , storeRead
+  -- * Widget state
+  , widgetState
+  , setWidgetState
   , slotOf
   -- * Application model
   , get
@@ -232,13 +232,14 @@ fnv1a = T.foldl' (\acc c -> mixFnv acc (fromIntegral (fromEnum c))) 0xcbf29ce484
 slotOf :: WidgetId -> Int
 slotOf = fromIntegral . hashWidgetId
 
--- | Update the store.
-storeUpdate :: (WidgetStore -> WidgetStore) -> ChibiUI model ()
-storeUpdate = modifyCtx ctxStore
+-- | A widget's entry in one of the store's maps.
+widgetState :: StoreMap s -> WidgetId -> ChibiUI model (Maybe s)
+widgetState m wid = lookupState m (slotOf wid) <$> readCtx ctxStore
 
--- | Read the store.
-storeRead :: (WidgetStore -> a) -> ChibiUI model a
-storeRead f = f <$> readCtx ctxStore
+-- | Replace ('Just') or remove ('Nothing') a widget's entry. Write only a
+-- changed value: each write rebuilds a path through the map.
+setWidgetState :: StoreMap s -> WidgetId -> Maybe s -> ChibiUI model ()
+setWidgetState m wid st = modifyCtx ctxStore (writeState m (slotOf wid) st)
 
 -- | Place a widget at the cursor: take the rectangle its size needs,
 -- advance the cursor past it, and return the rectangle. A 'nextWidth' or
