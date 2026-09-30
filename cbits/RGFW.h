@@ -2919,6 +2919,12 @@ RGFWDEF RGFW_key RGFW_physicalToMappedKey(RGFW_key keycode);
 		i32 maxSizeW, maxSizeH, minSizeW, minSizeH, aspectRatioW, aspectRatioH; /*!< for setting max/min resize (RGFW_WINDOWS) */
 		RGFW_bool actionFrame; /* frame after a caption button was toggled (e.g. minimize, maximize or close) */
 		WCHAR highSurrogate;
+		/* nano-ui: live border-resize state, see RGFW_win32_dragResize;
+		   dragEdges is 0 while no drag runs. */
+		i32 dragEdges; /*!< moving-edge mask, RGFW_WIN_DRAG_* */
+		RECT dragRect; /*!< window rect when the drag started */
+		POINT dragPoint; /*!< screen cursor when the drag started */
+		i32 dragFrameW, dragFrameH; /*!< window minus client size */
 		#if defined(RGFW_OPENGL) || defined(RGFW_EGL)
 			RGFW_gfxContext ctx;
 			RGFW_gfxContextType gfxType;
@@ -11142,6 +11148,62 @@ void RGFW_win32_makeWindowDarkMode(RGFW_window* win, RGFW_bool state) {
 	DwmSetWindowAttributeSRC(win->src.window, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &value, sizeof(value));
 }
 
+/* nano-ui: live border resize. DefWindowProc's size drag runs a modal
+   loop, so DispatchMessage does not return until the user releases the
+   border and the app cannot draw: the window shows stale pixels while it
+   grows. Instead the border click records the drag (WM_NCLBUTTONDOWN)
+   and every captured WM_MOUSEMOVE applies the moved rect, so each drag
+   step is ordinary queued events the app redraws from. */
+#define RGFW_WIN_DRAG_LEFT 1
+#define RGFW_WIN_DRAG_RIGHT 2
+#define RGFW_WIN_DRAG_TOP 4
+#define RGFW_WIN_DRAG_BOTTOM 8
+
+/* Moving-edge masks for the HTLEFT..HTBOTTOMRIGHT hit tests. */
+static const i32 RGFW_win32_dragMasks[8] = {
+	RGFW_WIN_DRAG_LEFT,
+	RGFW_WIN_DRAG_RIGHT,
+	RGFW_WIN_DRAG_TOP,
+	RGFW_WIN_DRAG_TOP | RGFW_WIN_DRAG_LEFT,
+	RGFW_WIN_DRAG_TOP | RGFW_WIN_DRAG_RIGHT,
+	RGFW_WIN_DRAG_BOTTOM,
+	RGFW_WIN_DRAG_BOTTOM | RGFW_WIN_DRAG_LEFT,
+	RGFW_WIN_DRAG_BOTTOM | RGFW_WIN_DRAG_RIGHT,
+};
+
+void RGFW_win32_dragResize(RGFW_window* win) {
+	RECT rect = win->src.dragRect;
+	const i32 edges = win->src.dragEdges;
+	POINT pt;
+	i32 w, h, minW, minH;
+
+	if (GetCursorPos(&pt) == FALSE) return;
+
+	if (edges & RGFW_WIN_DRAG_LEFT) rect.left += pt.x - win->src.dragPoint.x;
+	if (edges & RGFW_WIN_DRAG_RIGHT) rect.right += pt.x - win->src.dragPoint.x;
+	if (edges & RGFW_WIN_DRAG_TOP) rect.top += pt.y - win->src.dragPoint.y;
+	if (edges & RGFW_WIN_DRAG_BOTTOM) rect.bottom += pt.y - win->src.dragPoint.y;
+
+	/* keep the client area within the window's min/max, anchored on the
+	   edges that are not moving */
+	minW = (win->src.minSizeW > 0 ? win->src.minSizeW : 1) + win->src.dragFrameW;
+	minH = (win->src.minSizeH > 0 ? win->src.minSizeH : 1) + win->src.dragFrameH;
+	w = rect.right - rect.left;
+	h = rect.bottom - rect.top;
+	if (w < minW) w = minW;
+	if (h < minH) h = minH;
+	if (win->src.maxSizeW > 0 && w > win->src.maxSizeW + win->src.dragFrameW) w = win->src.maxSizeW + win->src.dragFrameW;
+	if (win->src.maxSizeH > 0 && h > win->src.maxSizeH + win->src.dragFrameH) h = win->src.maxSizeH + win->src.dragFrameH;
+
+	if (edges & RGFW_WIN_DRAG_LEFT) rect.left = rect.right - w;
+	else rect.right = rect.left + w;
+	if (edges & RGFW_WIN_DRAG_TOP) rect.top = rect.bottom - h;
+	else rect.bottom = rect.top + h;
+
+	SetWindowPos(win->src.window, NULL, rect.left, rect.top, w, h,
+		SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
 	switch (message) {
@@ -11201,6 +11263,10 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             break;
         }
 		case WM_CAPTURECHANGED:         {
+			/* nano-ui: another window stole the capture mid-drag; end the
+			   manual resize so it cannot keep following the cursor. */
+			win->src.dragEdges = 0;
+
             if (lParam == 0 && win->src.actionFrame) {
 				RGFW_window_captureMousePlatform(win, win->internal.captureMouse);
                 win->src.actionFrame = RGFW_FALSE;
@@ -11304,7 +11370,24 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			break;
 
 		case WM_NCLBUTTONDOWN: {
-            /* workaround for half-second pause when starting to move window
+			/* nano-ui: a sizing border starts the manual drag above; the
+			   modal size loop would freeze the app until release. */
+			RECT wr, cr;
+
+			if (wParam >= HTLEFT && wParam <= HTBOTTOMRIGHT &&
+				IsZoomed(win->src.window) == FALSE && IsIconic(win->src.window) == FALSE &&
+				GetWindowRect(win->src.window, &wr) != FALSE &&
+				GetClientRect(win->src.window, &cr) != FALSE &&
+				GetCursorPos(&win->src.dragPoint) != FALSE) {
+				win->src.dragEdges = RGFW_win32_dragMasks[wParam - HTLEFT];
+				win->src.dragRect = wr;
+				win->src.dragFrameW = (wr.right - wr.left) - (cr.right - cr.left);
+				win->src.dragFrameH = (wr.bottom - wr.top) - (cr.bottom - cr.top);
+				SetCapture(win->src.window);
+				return 0;
+			}
+
+			/* workaround for half-second pause when starting to move window
                 see: https://gamedev.net/forums/topic/672094-keeping-things-moving-during-win32-moveresize-events/5254386/
             */
             POINT point = { 0, 0 };
@@ -11403,6 +11486,10 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			break;
 		}
 		case WM_MOUSEMOVE: {
+			/* nano-ui: a live border drag applies the moved rect; the
+			   WM_SIZE it queues plus this motion give the app a frame. */
+			if (win->src.dragEdges != 0) RGFW_win32_dragResize(win);
+
 			if (win->internal.mouseInside == RGFW_FALSE) {
 				RGFW_mouseNotifyCallback(win, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), RGFW_TRUE);
 			}
@@ -11477,6 +11564,7 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			/* nano-ui: report the release before ReleaseCapture, which sends
 			   WM_CAPTURECHANGED and would release held buttons itself. */
 			RGFW_mouseButtonCallback(win, value, 0);
+			win->src.dragEdges = 0;
 			ReleaseCapture();
 			break;
 		}
