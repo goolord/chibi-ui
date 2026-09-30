@@ -23,7 +23,7 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
-import ChibiUI.Internal.Draw (emitQuadUV, texImage)
+import ChibiUI.Internal.Draw (emitQuadUV, fillRect, texImage)
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
@@ -538,18 +538,36 @@ plotLines values = do
              in [V2 (xAt i) (yAt v) | (i, v) <- zip [0 :: Int ..] values]
   withClip r (drawPolyline (themeAccent th) points)
 
--- The line as 2px-wide columns, one per pixel column of each segment,
--- spanning what the segment covers there. Every quad stays a rectangle,
--- as clipping and damage need, and a plot costs about a quad per pixel of
--- width, however many samples or however steep.
+-- The line through points in ascending x, as 2px-wide columns, one per
+-- pixel column, spanning what every segment covers there. Every quad stays
+-- a rectangle, as clipping and damage need, and a plot costs at most a
+-- quad per pixel of width, however many samples or however steep: the
+-- segments crossing one column arrive together and merge into one span.
 drawPolyline :: Color -> [V2] -> ChibiUI model ()
-drawPolyline col ps = forM_ (zip ps (drop 1 ps)) $ \(V2 ax ay, V2 bx by) ->
-  forM_ [floor ax .. max (floor ax) (ceiling bx - 1) :: Int] $ \c -> do
-    let yAt x = ay + (by - ay) * (x - ax) / (bx - ax)
-        (y0, y1)
-          | bx > ax = (yAt (max ax (fromIntegral c)), yAt (min bx (fromIntegral c + 1)))
-          | otherwise = (ay, by)
-    fillRectUI (Rect (fromIntegral c - 0.5) (min y0 y1 - 1) 2 (abs (y1 - y0) + 2)) col
+drawPolyline col ps = drawIO $ \arena ->
+  let
+    -- Column @k@ of the segment from @(ax, ay)@ to @(bx, by)@; the open
+    -- column @c@ spans @lo .. hi@, 'minBound' while none is open. A
+    -- segment's last column is often the next one's first, which then
+    -- merges into it.
+    walk !c !lo !hi !k !ax !ay !bx !by more
+      | k > max (floor ax) (ceiling bx - 1) = case more of
+          V2 nx ny : more' -> walk c lo hi (floor bx) bx by nx ny more'
+          [] -> emit c lo hi
+      | otherwise =
+          let yAt x = ay + (by - ay) * (x - ax) / (bx - ax)
+              !y0 = if bx > ax then yAt (max ax (fromIntegral k)) else ay
+              !y1 = if bx > ax then yAt (min bx (fromIntegral k + 1)) else by
+              !a = min y0 y1
+              !b = max y0 y1
+           in if k == c
+                then walk c (min lo a) (max hi b) (k + 1) ax ay bx by more
+                else emit c lo hi >> walk k a b (k + 1) ax ay bx by more
+    emit !c !lo !hi =
+      when (c /= minBound) (fillRect arena (Rect (fromIntegral c - 0.5) (lo - 1) 2 (hi - lo + 2)) col)
+   in case ps of
+        V2 x0 y0 : V2 x1 y1 : more -> walk (minBound :: Int) 0 0 (floor x0) x0 y0 x1 y1 more
+        _ -> pure ()
 
 -- | A basic table: a header row, zebra-striped data rows, hover
 -- highlighting, and row selection on click, or with Up and Down while

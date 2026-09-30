@@ -468,7 +468,10 @@ testPlotLines = do
   (emptyCount, _) <- draw []
   (singleCount, _) <- draw [3]
   assert "plot: wave, flat or empty series drew wrong amounts"
-    (waveCount > flatCount && flatCount > emptyCount && singleCount > emptyCount)
+    (waveCount >= flatCount && flatCount > emptyCount && singleCount > emptyCount)
+  -- However steep, a line costs at most a quad per pixel column.
+  assert "plot: more than one quad per pixel column"
+    ((waveCount - emptyCount) `div` 4 <= 100)
   assert "plot: geometry escaped its rect" waveInside
 
 testLayoutCursor :: IO ()

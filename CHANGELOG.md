@@ -19,6 +19,10 @@
   force a full repaint: packing only appends, so no existing quad samples
   different texels. `fontTakeDirty` reports an `AtlasChange`.
 
+- Plots merge every segment crossing a pixel column into one quad, so a
+  line costs at most a quad per pixel of width however many samples it
+  has (the demo's plot: 58 fewer quads).
+
 - App keys (`keyPressed`, `keyHeld`, `shortcut`, `primaryShortcut`) are
   suppressed only while a text field is focused, not while any widget is:
   a clicked button no longer swallows Ctrl+S. Tables take focus and Tab,
