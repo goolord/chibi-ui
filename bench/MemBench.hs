@@ -13,7 +13,7 @@ import Data.List (sortOn)
 import Data.Word (Word64)
 import qualified Data.Text as T
 import GHC.Stats (GCDetails (..), RTSStats (..), getRTSStats)
-import System.Mem (performMajorGC)
+import System.Mem (performMajorGC, performMinorGC)
 import ChibiUI (get)
 import ChibiUI.Backend
 import DemoCore (Model (..), demo, demoModel)
@@ -67,12 +67,15 @@ data PhaseStats = PhaseStats
   }
 
 -- | Run @n@ frames with per-frame tweaks numbered @0 .. n - 1@ and measure
--- the allocation delta.
+-- the allocation delta. The RTS counts allocation at collections, so a
+-- minor collection on each side pins the count to the phase.
 phase :: Bench -> String -> Int -> (Int -> Input -> Input) -> IO PhaseStats
 phase b name n tweak = do
+  performMinorGC
   s0 <- getRTSStats
   d0 <- readIORef (benchDamage b)
   forM_ [0 .. n - 1] $ \i -> stepFrame b (tweak i)
+  performMinorGC
   s1 <- getRTSStats
   d1 <- readIORef (benchDamage b)
   let bytes = allocated_bytes s1 - allocated_bytes s0
@@ -141,6 +144,7 @@ main = do
         | (_, r) <- sortOn (\(_, r) -> (rectY r, rectX r)) rects
         ]
       tour = take 48 centres
+  performMinorGC
   s0 <- getRTSStats
   d0 <- readIORef (benchDamage b)
   forM_ tour $ \(x, y) -> do
@@ -148,6 +152,7 @@ main = do
     _ <- stepFrame b (at x y . releaseLeft)
     _ <- stepFrame b (typeChar 'x')
     pure ()
+  performMinorGC
   s1 <- getRTSStats
   d1 <- readIORef (benchDamage b)
   reportPhase
