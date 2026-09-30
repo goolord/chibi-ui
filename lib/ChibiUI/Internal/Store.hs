@@ -68,8 +68,9 @@ lookupState (StoreMap get _) k = IM.lookup k . get
 writeState :: StoreMap a -> Int -> Maybe a -> WidgetStore -> WidgetStore
 writeState (StoreMap get set) k v st = set (maybe (IM.delete k) (IM.insert k) v (get st)) st
 
--- | A scroll region's offset, and the extent of its body when last run.
-data ScrollState = ScrollState !Float !Float
+-- | A scroll region's offset, the extent of its body when last run, and
+-- where along the thumb the pointer holds it while dragging the scrollbar.
+data ScrollState = ScrollState !Float !Float !Float
   deriving (Eq)
 
 -- | What a text field keeps between frames.

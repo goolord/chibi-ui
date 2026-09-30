@@ -525,6 +525,29 @@ testScroll = do
   _ <- frame ctx id view
   top2 <- childTops
   unless (top2 == rectY r) (fail ("scroll: did not clamp back to the top: " ++ show top2))
+  -- Pressing the track's bottom brings the thumb there: fully scrolled,
+  -- so the wheel moves the body no further.
+  let barX = rectX r + rectW r - 2
+      bottom = rectY r + rectH r - 1
+  _ <- frame ctx (at barX bottom . pressLeft) view
+  top3 <- childTops
+  unless (top3 < rectY r) (fail ("scroll: track press did not scroll: " ++ show top3))
+  _ <- frame ctx (\i -> (at barX bottom i) {inputScroll = V2 0 1}) view
+  top4 <- childTops
+  unless (top4 == top3) (fail ("scroll: track press did not reach the end: " ++ show (top3, top4)))
+  -- Dragging holds the thumb even with the pointer off the bar, and
+  -- dragging above the region clamps at the top.
+  _ <- frame ctx (at cx (rectY r + rectH r / 2)) view
+  top5 <- childTops
+  unless (top3 < top5 && top5 < rectY r) (fail ("scroll: drag to the middle landed at " ++ show top5))
+  _ <- frame ctx (at cx (rectY r - 100)) view
+  _ <- frame ctx (at cx (rectY r - 100) . releaseLeft) view
+  top6 <- childTops
+  unless (top6 == rectY r) (fail ("scroll: drag to the top landed at " ++ show top6))
+  -- Released, the pointer moving over the bar no longer scrolls.
+  _ <- frame ctx (at barX bottom) view
+  top7 <- childTops
+  unless (top7 == rectY r) (fail ("scroll: released drag still scrolled: " ++ show top7))
 
 -- | Fonts survive the session's startup sequence (a second font replacing
 -- the context's) and scale changes rebuild cleanly. A regression here once
