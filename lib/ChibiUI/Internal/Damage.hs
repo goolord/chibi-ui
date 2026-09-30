@@ -26,7 +26,7 @@ import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
-import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), vertexSize)
+import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, vertexSize)
 import ChibiUI.Internal.Types
   ( Rect (..)
   , Size (..)
@@ -65,10 +65,6 @@ data FrameSnapshot = FrameSnapshot
     -- already sees; a texture changing in place can repaint different
     -- pixels over identical geometry and forces a full frame.
   }
-
--- | Bytes per quad: four vertices.
-quadBytes :: Int
-quadBytes = 4 * vertexSize
 
 -- | Quads a snapshot holds.
 snapQuadCount :: FrameSnapshot -> Int
@@ -181,13 +177,13 @@ diffQuads old new n = go 0 (0 :: Int) []
           d <- c_memcmp (old `plusPtr` off) (new `plusPtr` off) (fromIntegral quadBytes)
           if d == 0 then go (k + 1) count acc else go (k + 1) (count + 1) (k : acc)
 
--- | Union the bounds of the quads a command's index range covers, for
--- testing a command against a damage rectangle without drawing it.
+-- | Union the bounds of a command's quads, for testing a command against
+-- a damage rectangle without drawing it.
 commandQuadBounds :: DrawData -> DrawCmd -> IO Rect
 commandQuadBounds dd cmd =
   withForeignPtr (drawVertices dd) $ \vp -> do
-    let first = fromIntegral (cmdIndexOffset cmd) `div` 6
-        end = (fromIntegral (cmdIndexOffset cmd) + fromIntegral (cmdIndexCount cmd)) `div` 6
+    let first = fromIntegral (cmdFirstQuad cmd)
+        end = first + fromIntegral (cmdQuadCount cmd)
     if end <= first
       then pure (Rect 0 0 0 0)
       else do

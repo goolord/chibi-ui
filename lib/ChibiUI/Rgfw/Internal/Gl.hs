@@ -60,7 +60,7 @@ foreign import ccall unsafe "chibi_ui_gl_read_retained"
   c_readRetained :: Ptr ChibiUiGl -> Ptr Word8 -> IO ()
 
 foreign import ccall unsafe "chibi_ui_gl_upload_geometry"
-  c_uploadGeometry :: Ptr ChibiUiGl -> Ptr Word8 -> Int32 -> Ptr Word8 -> Int32 -> IO ()
+  c_uploadGeometry :: Ptr ChibiUiGl -> Ptr Word8 -> Int32 -> IO ()
 
 foreign import ccall unsafe "chibi_ui_gl_draw_geometry"
   c_drawGeometry :: Ptr ChibiUiGl -> Int32 -> Int32 -> Int32 -> Int32 -> Word32 -> Word32 -> Int32 -> IO ()
@@ -121,32 +121,26 @@ renderFrameGl r font images !scale !fbW !fbH bg drawData damage = do
       c_present h
   writeIORef (glFrameSize r) (fbW, fbH)
 
--- | Hand the frame's buffers to the GPU. Partial and full frames alike
+-- | Hand the frame's vertices to the GPU. Partial and full frames alike
 -- upload everything; the draws below pick what to rasterize.
 uploadGeometry :: Ptr ChibiUiGl -> DrawData -> IO ()
 uploadGeometry h drawData =
   withForeignPtr (drawVertices drawData) $ \vp ->
-    withForeignPtr (drawIndices drawData) $ \ip ->
-      c_uploadGeometry
-        h
-        vp
-        (fromIntegral (drawVertexCount drawData))
-        ip
-        (fromIntegral (drawIndexCount drawData))
+    c_uploadGeometry h vp (fromIntegral (drawVertexCount drawData))
 
 -- | Draw one command scissored to a physical-pixel box. Quads arrive
 -- already cut to their clips, so the scissor only bounds damage repaints.
 drawCmd :: Ptr ChibiUiGl -> (Int, Int, Int, Int) -> DrawCmd -> IO ()
 drawCmd h (x0, y0, x1, y1) cmd =
-  when (cmdIndexCount cmd >= 3) $
+  when (cmdQuadCount cmd > 0) $
     c_drawGeometry
       h
       (fromIntegral x0)
       (fromIntegral y0)
       (fromIntegral x1)
       (fromIntegral y1)
-      (cmdIndexOffset cmd)
-      (cmdIndexCount cmd)
+      (cmdFirstQuad cmd)
+      (cmdQuadCount cmd)
       (fromIntegral (cmdTextureId cmd))
 
 -- | Clear the damaged rectangles, then redraw each command whose quads

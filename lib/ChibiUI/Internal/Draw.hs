@@ -1,10 +1,16 @@
--- | The draw list: widgets emit quads into growable vertex and index
--- buffers, batched into commands that share a texture. Every quad is cut
--- to the current clip as it is emitted, so commands carry no clip and the
--- renderer needs no scissor to honour one. The vertex layout is nano-ui RGFW's 32-byte quad: logical position, RGBA
--- as four floats, and UV, so the C renderer needs no adaptation beyond its
--- name. Texture ids: 0 is flat geometry, 1 the glyph atlas, and 2 or more
--- are backend-registered images.
+-- | The draw list: widgets emit quads into a growable vertex buffer,
+-- batched into commands that share a texture. Every quad is cut to the
+-- current clip as it is emitted, so commands carry no clip and the
+-- renderer needs no scissor to honour one. The vertex layout is nano-ui
+-- RGFW's 32-byte vertex: logical position, RGBA as four floats, and UV.
+-- A quad is four vertices in order (top-left, top-right, bottom-right,
+-- bottom-left); its two triangles are always the same six indices over
+-- them, so the renderer keeps a fixed index buffer and the draw list holds
+-- none.
+--
+-- Texture ids: 0 is the atlas, which glyphs sample and flat geometry
+-- shares with a UV of -1 (full coverage), so text and the shapes around it
+-- stay in one batch; 1 or more are backend-registered images.
 module ChibiUI.Internal.Draw
   ( DrawArena
   , DrawCmd (..)
@@ -12,8 +18,7 @@ module ChibiUI.Internal.Draw
   , newDrawArena
   , resetDrawArena
   , finishFrame
-  , texFlat
-  , texGlyphAtlas
+  , texAtlas
   , texImage
   , pushClip
   , popClip
@@ -22,6 +27,7 @@ module ChibiUI.Internal.Draw
   , strokeRect
   , emitQuadUV
   , vertexSize
+  , quadBytes
   ) where
 
 import Control.Monad (when)
@@ -44,44 +50,39 @@ import ChibiUI.Internal.URef
 vertexSize :: Int
 vertexSize = 32
 
--- | Index stride in bytes: 4, for a 32-bit unsigned index.
-indexSize :: Int
-indexSize = 4
+-- | Bytes per quad: four vertices.
+quadBytes :: Int
+quadBytes = 4 * vertexSize
 
--- | Reserved texture id for flat, untextured geometry.
-texFlat :: Int
-texFlat = 0
-
--- | Reserved texture id for the baked glyph atlas.
-texGlyphAtlas :: Int
-texGlyphAtlas = 1
+-- | The texture id of the atlas: glyphs, and flat geometry.
+texAtlas :: Int
+texAtlas = 0
 
 -- | The draw-list texture id of a registered image. Image ids are 0-based.
 {-# INLINE texImage #-}
 texImage :: Int -> Int
-texImage img = img + 2
+texImage img = img + 1
 
 -- | One draw batch: a run of quads sampling one texture.
 data DrawCmd = DrawCmd
   { cmdTextureId :: {-# UNPACK #-} !Int
-  , cmdIndexOffset :: {-# UNPACK #-} !Word32
-  , cmdIndexCount :: {-# UNPACK #-} !Word32
+  , cmdFirstQuad :: {-# UNPACK #-} !Word32
+  , cmdQuadCount :: {-# UNPACK #-} !Word32
   }
   deriving (Eq, Show)
 
--- | One frame's geometry and batches. Vertex and index pointers refer to
--- reusable arena storage: render or copy them before running another frame
--- on the same arena. Counts describe the used prefix, not the capacity.
+-- | One frame's geometry and batches. The vertex pointer refers to
+-- reusable arena storage: render or copy it before running another frame
+-- on the same arena. The count describes the used prefix, not the
+-- capacity.
 data DrawData = DrawData
   { drawVertices :: ForeignPtr Word8
   , drawVertexCount :: !Int
-  , drawIndices :: ForeignPtr Word8
-  , drawIndexCount :: !Int
   , drawCommands :: [DrawCmd]
   }
 
--- | Growable buffers for one window's frames. Emit with 'fillRect' and
--- friends; snapshot with 'finishFrame'.
+-- | A growable vertex buffer for one window's frames. Emit with
+-- 'fillRect' and friends; snapshot with 'finishFrame'.
 data DrawArena = DrawArena
   { daVertex :: !(IORef (ForeignPtr Word8))
   , daVertexPtr :: !(IORef (Ptr Word8))
@@ -91,11 +92,6 @@ data DrawArena = DrawArena
   -- 'daVertex'.
   , daVertexCap :: !(IORef Int)
   , daVertexCount :: !URef
-  , daIndex :: !(IORef (ForeignPtr Word8))
-  , daIndexPtr :: !(IORef (Ptr Word32))
-  -- ^ The index buffer's base address, cached as above.
-  , daIndexCap :: !(IORef Int)
-  , daIndexCount :: !URef
   , daCommands :: !(IORef [DrawCmd])
   -- ^ Closed batches, most recent first. The batch still being extended
   -- lives in the @daBatch*@ refs below instead, so a quad that continues
@@ -105,27 +101,22 @@ data DrawArena = DrawArena
   , daBatchTexture :: !(IORef Int)
   , daBatchStart :: !URef
   , daBatchCount :: !URef
-  -- ^ The open batch: its texture, its first index, and its index count
-  -- so far. A count of zero means no batch is open.
+  -- ^ The open batch: its texture, its first quad, and its quad count so
+  -- far. A count of zero means no batch is open.
   }
 
 -- | A brand-new arena.
 newDrawArena :: IO DrawArena
 newDrawArena = do
   vbuf <- newBuffer 0
-  ibuf <- newBuffer 0
   vptr <- withForeignPtr vbuf (newIORef . castPtr)
-  iptr <- withForeignPtr ibuf (newIORef . (castPtr :: Ptr Word8 -> Ptr Word32))
   vref <- newIORef vbuf
-  iref <- newIORef ibuf
+  vcap <- newIORef 0
+  vcnt <- newURef 0
   cref <- newIORef []
   lcref <- newIORef infiniteClip
   cstack <- newIORef []
-  vcap <- newIORef 0
-  icap <- newIORef 0
-  vcnt <- newURef 0
-  icnt <- newURef 0
-  btex <- newIORef texFlat
+  btex <- newIORef texAtlas
   bstart <- newURef 0
   bcount <- newURef 0
   pure
@@ -134,10 +125,6 @@ newDrawArena = do
       , daVertexPtr = vptr
       , daVertexCap = vcap
       , daVertexCount = vcnt
-      , daIndex = iref
-      , daIndexPtr = iptr
-      , daIndexCap = icap
-      , daIndexCount = icnt
       , daCommands = cref
       , daLastClip = lcref
       , daClipStack = cstack
@@ -153,16 +140,15 @@ newBuffer = mallocForeignPtrBytes . max 1
 infiniteClip :: Rect
 infiniteClip = Rect 0 0 1e9 1e9
 
--- | Drop the frame's geometry and reset the clip. Buffers keep their
+-- | Drop the frame's geometry and reset the clip. The buffer keeps its
 -- capacity.
 resetDrawArena :: DrawArena -> IO ()
 resetDrawArena a = do
   writeURef (daVertexCount a) 0
-  writeURef (daIndexCount a) 0
   writeIORef (daCommands a) []
   writeIORef (daLastClip a) infiniteClip
   writeIORef (daClipStack a) []
-  writeIORef (daBatchTexture a) texFlat
+  writeIORef (daBatchTexture a) texAtlas
   writeURef (daBatchStart a) 0
   writeURef (daBatchCount a) 0
 
@@ -173,19 +159,13 @@ finishFrame :: DrawArena -> IO DrawData
 finishFrame a = do
   vfp <- readIORef (daVertex a)
   vc <- readURef (daVertexCount a)
-  ifp <- readIORef (daIndex a)
-  ic <- readURef (daIndexCount a)
-  cmds <-
-    do pend <- pendingCmd a
-       closed <- readIORef (daCommands a)
-       pure (reverse (pend ++ closed))
+  pend <- pendingCmd a
+  closed <- readIORef (daCommands a)
   pure
     DrawData
       { drawVertices = vfp
       , drawVertexCount = vc
-      , drawIndices = ifp
-      , drawIndexCount = ic
-      , drawCommands = cmds
+      , drawCommands = reverse (pend ++ closed)
       }
 
 -- | The open batch as a command, if one is open.
@@ -199,24 +179,22 @@ pendingCmd a = do
       s <- readURef (daBatchStart a)
       pure [DrawCmd t (fromIntegral s) (fromIntegral n)]
 
--- | Grow a buffer to at least @need@ bytes, keeping the old contents and
--- refreshing the cached base pointer. Inlined, so the steady-state
--- capacity check allocates nothing.
-{-# INLINE growBuffer #-}
-growBuffer :: IORef (ForeignPtr Word8) -> IORef (Ptr word) -> IORef Int -> Int -> IO ()
-growBuffer fpRef ptrRef capRef !need = do
-  cap <- readIORef capRef
-  if need <= cap
-    then pure ()
-    else do
-      let cap' = max need (max 4096 (cap * 2))
-      fp <- readIORef fpRef
-      fp' <- newBuffer cap'
-      withForeignPtr fp $ \src ->
-        withForeignPtr fp' $ \dst -> copyBytes dst src cap
-      writeIORef fpRef fp'
-      writeIORef capRef cap'
-      withForeignPtr fp' $ \p -> writeIORef ptrRef (castPtr p)
+-- | Grow the vertex buffer to at least @need@ bytes, keeping the old
+-- contents and refreshing the cached base pointer. Inlined, so the
+-- steady-state capacity check allocates nothing.
+{-# INLINE growVertices #-}
+growVertices :: DrawArena -> Int -> IO ()
+growVertices a !need = do
+  cap <- readIORef (daVertexCap a)
+  when (need > cap) $ do
+    let cap' = max need (max 4096 (cap * 2))
+    fp <- readIORef (daVertex a)
+    fp' <- newBuffer cap'
+    withForeignPtr fp $ \src ->
+      withForeignPtr fp' $ \dst -> copyBytes dst src cap
+    writeIORef (daVertex a) fp'
+    writeIORef (daVertexCap a) cap'
+    withForeignPtr fp' $ \p -> writeIORef (daVertexPtr a) p
 
 -- | The current clip, in window coordinates. Emitters cut every quad to it.
 currentClip :: DrawArena -> IO Rect
@@ -249,8 +227,7 @@ popClip a = do
 
 -- | Append a quad sampling texture @tex@ under the current clip. The quad
 -- is @x0, y0, x1, y1@ in logical pixels with the given colour, and UV
--- corners for textured batches (ignored by flat geometry). A texture
--- change starts a new batch.
+-- corners. A texture change starts a new batch.
 {-# INLINE emitQuadUV #-}
 emitQuadUV :: DrawArena -> Int -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO ()
 emitQuadUV a !tex !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
@@ -269,19 +246,22 @@ emitQuadUV a !tex !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
           !h = y1 - y0
           ux x = if w > 0 then u0 + (u1 - u0) * ((x - x0) / w) else u0
           uy y = if h > 0 then v0 + (v1 - v0) * ((y - y0) / h) else v0
-      base <- pushVertices a nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
-      pushIndices a base
-      batchCommand a tex
+      n <- readURef (daVertexCount a)
+      growVertices a ((n + 4) * vertexSize)
+      buf <- readIORef (daVertexPtr a)
+      writeQuadVertices buf n nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
+      writeURef (daVertexCount a) (n + 4)
+      batchQuad a tex (n `quot` 4)
 
 -- | Corners of a rect as @x0, y0, x1, y1@.
 {-# INLINE clipEdges #-}
 clipEdges :: Rect -> (Float, Float, Float, Float)
 clipEdges (Rect x y w h) = (x, y, x + w, y + h)
 
--- | A solid rectangle.
+-- | A solid rectangle: an atlas quad whose UV of -1 reads as full coverage.
 {-# INLINE fillRect #-}
 fillRect :: DrawArena -> Rect -> Color -> IO ()
-fillRect a (Rect x y w h) c = emitQuadUV a texFlat x y (x + w) (y + h) c 0 0 0 0
+fillRect a (Rect x y w h) c = emitQuadUV a texAtlas x y (x + w) (y + h) c (-1) (-1) (-1) (-1)
 
 -- | A border of @bw@ logical pixels, drawn inside the rectangle's edges.
 strokeRect :: DrawArena -> Rect -> Float -> Color -> IO ()
@@ -295,47 +275,24 @@ strokeRect a (Rect x y w h) bw c
       fillRect a (Rect x (y + t) t (h - t - b)) c
       fillRect a (Rect (x + w - t) (y + t) t (h - t - b)) c
 
--- | Write one quad's four vertices; returns the first vertex's index.
-{-# INLINE pushVertices #-}
-pushVertices :: DrawArena -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO Word32
-pushVertices a !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
-  n <- readURef (daVertexCount a)
-  growBuffer (daVertex a) (daVertexPtr a) (daVertexCap a) ((n + 4) * vertexSize)
-  buf <- readIORef (daVertexPtr a)
-  writeQuadVertices buf n x0 y0 x1 y1 col u0 v0 u1 v1
-  writeURef (daVertexCount a) (n + 4)
-  pure (fromIntegral n)
-
--- | The two triangles of a quad, as six indices over its four vertices.
-{-# INLINE pushIndices #-}
-pushIndices :: DrawArena -> Word32 -> IO ()
-pushIndices a !base = do
-  n <- readURef (daIndexCount a)
-  growBuffer (daIndex a) (daIndexPtr a) (daIndexCap a) ((n + 6) * indexSize)
-  buf <- readIORef (daIndexPtr a)
-  writeQuadIndices buf n base
-  writeURef (daIndexCount a) (n + 6)
-
--- | Extend the open batch when the quad's texture continues it; else close
--- the open batch into the command list and open a fresh one. Continuing a
--- batch only bumps a counter, so the common run of quads under one
--- texture allocates nothing per quad.
-{-# INLINE batchCommand #-}
-batchCommand :: DrawArena -> Int -> IO ()
-batchCommand a !texture = do
-  idxCount <- readURef (daIndexCount a)
-  let idxStart = idxCount - 6
+-- | Extend the open batch with quad @q@ when its texture continues it; else
+-- close the open batch into the command list and open a fresh one.
+-- Continuing a batch only bumps a counter, so the common run of quads
+-- under one texture allocates nothing per quad.
+{-# INLINE batchQuad #-}
+batchQuad :: DrawArena -> Int -> Int -> IO ()
+batchQuad a !texture !q = do
   openTex <- readIORef (daBatchTexture a)
   openCount <- readURef (daBatchCount a)
   if openCount > 0 && openTex == texture
-    then writeURef (daBatchCount a) (openCount + 6)
+    then writeURef (daBatchCount a) (openCount + 1)
     else do
       when (openCount > 0) $ do
         openStart <- readURef (daBatchStart a)
         modifyIORef' (daCommands a) (DrawCmd openTex (fromIntegral openStart) (fromIntegral openCount) :)
       writeIORef (daBatchTexture a) texture
-      writeURef (daBatchStart a) idxStart
-      writeURef (daBatchCount a) 6
+      writeURef (daBatchStart a) q
+      writeURef (daBatchCount a) 1
 
 -- | Write four vertices in the C renderer's 32-byte layout: position, RGBA
 -- as four floats, UV. Colour channels come from the packed @0xRRGGBBAA@ word.
@@ -357,18 +314,3 @@ writeQuadVertices !buf !n !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
   put 1 x1 y0 u1 v0
   put 2 x1 y1 u1 v1
   put 3 x0 y1 u0 v1
-
--- | Write the quad's six indices.
-writeQuadIndices :: Ptr Word32 -> Int -> Word32 -> IO ()
-writeQuadIndices !buf !n !base = do
-  let !p = buf `plusPtr` (n * indexSize)
-      !i0 = base
-      !i1 = base + 1
-      !i2 = base + 2
-      !i3 = base + 3
-  pokeByteOff p 0 i0
-  pokeByteOff p 4 i1
-  pokeByteOff p 8 i2
-  pokeByteOff p 12 i0
-  pokeByteOff p 16 i2
-  pokeByteOff p 20 i3

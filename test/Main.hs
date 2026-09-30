@@ -9,9 +9,8 @@ import Data.IORef
 import Data.List (sortOn)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr)
-import Foreign.Storable (peekByteOff, peekElemOff)
+import Foreign.Storable (peekByteOff)
 import qualified Data.Text as T
-import Data.Word (Word32)
 import System.Info (os)
 import ChibiUI
 import ChibiUI.Backend
@@ -332,7 +331,7 @@ testTextAreaViewport = do
         input <- contextInput ctx
         (_, dd) <- runFrame ctx (tweak (clearEphemeral input)) view
         points <- verticesFor dd (const True)
-        glyphs <- verticesFor dd ((== texGlyphAtlas) . cmdTextureId)
+        glyphs <- glyphVertices dd
         assert "textarea: painting escaped assigned bounds" (all (inside (Rect 10 10 80 36)) points)
         assert "textarea: glyphs escaped content viewport" (all (inside (Rect 14 14 72 28)) glyphs)
         assert "textarea: visible text disappeared" (not (null glyphs))
@@ -352,7 +351,7 @@ testTextAreaViewport = do
   render (chord primaryMods [KeyChar 'a'])
   render (chord primaryMods [KeyHome])
   (_, tiny) <- runFrame ctx emptyInput (nextWidth 2 >> nextHeight 2 >> textArea source)
-  tinyGlyphs <- verticesFor tiny ((== texGlyphAtlas) . cmdTextureId)
+  tinyGlyphs <- glyphVertices tiny
   assert "textarea: empty viewport emitted text" (null tinyGlyphs)
   hiddenCtx <- newTestContext
   let hidden = nextHeight 10 >> scrollColumn (space 20 >> textArea "hidden\ntext")
@@ -540,10 +539,8 @@ testFontScales = do
       ( \s -> do
           setScale ctx s
           (_, dd) <- runFrame ctx (emptyInput {inputWindowSize = Size 400 400}) w
-          pure
-            ( drawVertexCount dd > 0
-                && any ((== texGlyphAtlas) . cmdTextureId) (drawCommands dd)
-            )
+          glyphs <- glyphVertices dd
+          pure (drawVertexCount dd > 0 && not (null glyphs))
       )
       [1.0, 2.0, 1.5, 1.0]
   unless (and renders) (fail "font scales: a frame at some scale drew no text")
@@ -557,19 +554,18 @@ testDrawData :: IO ()
 testDrawData = do
   ctx <- newTestContext
   (_, dd) <- runFrame ctx emptyInput (label "hello")
-  unless (drawVertexCount dd > 0) (fail "draw data: no vertices for a label")
-  unless (drawIndexCount dd >= 6) (fail "draw data: no indices for a label")
+  unless (drawVertexCount dd >= 4 && drawVertexCount dd `mod` 4 == 0) $
+    fail "draw data: no whole quads for a label"
   when (null (drawCommands dd)) (fail "draw data: no commands")
   -- Glyph commands sample the atlas texture.
-  unless (any ((== texGlyphAtlas) . cmdTextureId) (drawCommands dd)) $
-    fail "draw data: no glyph atlas command"
-  -- The first glyph quad's indices are 0,1,2,0,2,3 and the next quad's
-  -- continue at 4: a regression here once drew degenerate triangles and a
-  -- blank window, with every count still looking right.
-  idx <- withForeignPtr (drawIndices dd) $ \p ->
-    mapM (peekElemOff (castPtr p :: Ptr Word32)) [0 .. 11]
-  unless (idx == [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]) $
-    fail ("draw data: bad indices " ++ show idx)
+  unless (any ((== texAtlas) . cmdTextureId) (drawCommands dd)) $
+    fail "draw data: no atlas command"
+  -- The commands tile the quads in order, from the first: the renderer
+  -- draws each through its fixed index buffer, so a gap or overlap would
+  -- skip or double-draw quads with every count still looking right.
+  let tiles = [(fromIntegral (cmdFirstQuad c), fromIntegral (cmdQuadCount c)) | c <- drawCommands dd] :: [(Int, Int)]
+  unless (map fst tiles == scanl (+) 0 (map snd (init tiles)) && sum (map snd tiles) == drawVertexCount dd `div` 4) $
+    fail ("draw data: commands do not tile the quads " ++ show tiles)
   -- The first glyph's quad starts at the label's origin, within a glyph's
   -- bearings: the pen is at the content origin and the raster is the font's.
   (x, y) <- withForeignPtr (drawVertices dd) $ \p -> do
@@ -578,23 +574,25 @@ testDrawData = do
     pure (vx, vy)
   unless (x >= 10 && x < 12 && y >= 9 && y < 14) $
     fail ("draw data: first glyph at " ++ show (x, y) ++ ", expected near (10,10)")
-  -- Every glyph quad's UVs lie inside the atlas; a misread struct once
-  -- produced v ~ 5e7, clamping every sample to an empty atlas row.
-  let glyphStarts =
-        [ fromIntegral (cmdIndexOffset c) :: Int
+  -- Every atlas quad is flat (all UVs -1) or a glyph whose UVs lie inside
+  -- the atlas; a misread struct once produced v ~ 5e7, clamping every
+  -- sample to an empty atlas row.
+  let atlasVertices =
+        [ v
         | c <- drawCommands dd
-        , cmdTextureId c == texGlyphAtlas
-        ]
+        , cmdTextureId c == texAtlas
+        , v <- [fromIntegral (cmdFirstQuad c) * 4 .. fromIntegral (cmdFirstQuad c + cmdQuadCount c) * 4 - 1]
+        ] :: [Int]
   badUv <-
     withForeignPtr (drawVertices dd) $ \p ->
       filterM
         ( \v -> do
             u <- peekByteOff (castPtr p :: Ptr Float) (v * 32 + 24) :: IO Float
             v' <- peekByteOff (castPtr p :: Ptr Float) (v * 32 + 28) :: IO Float
-            pure (u < 0 || u > 1 || v' < 0 || v' > 1)
+            pure (not ((u == -1 && v' == -1) || (u >= 0 && u <= 1 && v' >= 0 && v' <= 1)))
         )
-        glyphStarts
-  unless (null badUv) (fail ("draw data: glyph UVs out of the atlas at vertices " ++ show (take 3 badUv)))
+        atlasVertices
+  unless (null badUv) (fail ("draw data: atlas UVs neither flat nor in the atlas at vertices " ++ show (take 3 badUv)))
 
 testDamage :: IO ()
 testDamage = do
@@ -645,16 +643,24 @@ keys ks inp = inp {inputKeys = ks}
 
 -- Test actual clipped geometry, not just the presence of a scissor command.
 verticesFor :: DrawData -> (DrawCmd -> Bool) -> IO [(Float, Float)]
-verticesFor dd select = withForeignPtr (drawIndices dd) $ \indices ->
-  withForeignPtr (drawVertices dd) $ \vertices -> do
-    let offsets = concat
-          [ [fromIntegral (cmdIndexOffset c) .. fromIntegral (cmdIndexOffset c + cmdIndexCount c) - 1]
-          | c <- drawCommands dd, select c
-          ]
-    mapM (\i -> do
-      v <- peekElemOff (castPtr indices :: Ptr Word32) i
-      let off = fromIntegral v * 32
-      (,) <$> peekByteOff vertices off <*> peekByteOff vertices (off + 4)) offsets
+verticesFor dd select = concatMap snd <$> quadsFor dd select
+
+-- The glyph quads' corners: atlas quads whose UVs are not the flat marker.
+glyphVertices :: DrawData -> IO [(Float, Float)]
+glyphVertices dd = do
+  quads <- quadsFor dd ((== texAtlas) . cmdTextureId)
+  pure (concat [corners | (u, corners) <- quads, u >= 0])
+
+-- Each quad of the selected commands: its first vertex's U, and its four
+-- corners.
+quadsFor :: DrawData -> (DrawCmd -> Bool) -> IO [(Float, [(Float, Float)])]
+quadsFor dd select = withForeignPtr (drawVertices dd) $ \vertices -> do
+  let quads = concat
+        [ [fromIntegral (cmdFirstQuad c) .. fromIntegral (cmdFirstQuad c + cmdQuadCount c) - 1]
+        | c <- drawCommands dd, select c
+        ] :: [Int]
+      corner v = (,) <$> peekByteOff vertices (v * 32) <*> peekByteOff vertices (v * 32 + 4)
+  mapM (\q -> (,) <$> peekByteOff vertices (q * 128 + 24) <*> mapM corner [q * 4 .. q * 4 + 3]) quads
 
 inside :: Rect -> (Float, Float) -> Bool
 inside r (x, y) = x >= rectX r && y >= rectY r
@@ -671,7 +677,7 @@ testFieldClipping = do
   assert "field: nextWidth was overwritten" (rectW r == 60)
   let inner = Rect (rectX r + 4) (rectY r + 4) (rectW r - 8) (rectH r - 8)
       check dd = do
-        points <- verticesFor dd ((== texGlyphAtlas) . cmdTextureId)
+        points <- glyphVertices dd
         allPoints <- verticesFor dd (const True)
         assert "field: missing visible text" (not (null points))
         assert "field: text escaped fixed content clip" (all (inside inner) points)
@@ -682,7 +688,7 @@ testFieldClipping = do
   (_, home) <- runFrame ctx (keys [KeyHome] emptyInput) view
   check home
   (_, tiny) <- runFrame ctx emptyInput (nextWidth 2 >> nextHeight 2 >> textInput text)
-  points <- verticesFor tiny ((== texGlyphAtlas) . cmdTextureId)
+  points <- glyphVertices tiny
   assert "field: empty content clip emitted glyphs" (null points)
 
 testFieldLifecycle :: IO ()
@@ -1108,7 +1114,7 @@ testTextAlignment = do
   ctx <- newTestContext
   let glyphY align = do
         (_, dd) <- runFrame ctx emptyInput (withTextAlign align (nextHeight 53 >> label "align"))
-        points <- verticesFor dd ((== texGlyphAtlas) . cmdTextureId)
+        points <- glyphVertices dd
         pure (minimum (map snd points))
   top <- glyphY AlignTop
   middle <- glyphY AlignMiddle

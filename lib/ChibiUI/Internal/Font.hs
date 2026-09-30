@@ -41,7 +41,7 @@ import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.IOArray (IOArray, newIOArray, unsafeReadIOArray, unsafeWriteIOArray)
-import ChibiUI.Internal.Draw (DrawArena, emitQuadUV, texGlyphAtlas)
+import ChibiUI.Internal.Draw (DrawArena, emitQuadUV, texAtlas)
 import ChibiUI.Internal.Types (Color, roundHalfUp, validScale)
 
 -- | The embedded TrueType font, from nano-ui's SDL backend: a subset of
@@ -300,7 +300,7 @@ fontDrawText f arena penX penY col t = do
                       let px = fromIntegral (roundHalfUp pen)
                        in emitQuadUV
                             arena
-                            texGlyphAtlas
+                            texAtlas
                             ((px + gdX1 g) * invScale)
                             ((baseY + gdY1 g) * invScale)
                             ((px + gdX1 g + gdW g) * invScale)

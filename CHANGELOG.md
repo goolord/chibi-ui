@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Flat geometry and text share one batch: flat quads sample the atlas
+  with a UV of -1, which reads as full coverage, so the demo draws in 3
+  calls instead of 36. The renderer keeps a fixed index buffer, and the
+  draw list holds vertices only. `Backend` changes: `texFlat` and
+  `texGlyphAtlas` become `texAtlas` (id 0), image ids start at 1,
+  `DrawCmd` counts quads (`cmdFirstQuad`, `cmdQuadCount`), and `DrawData`
+  loses `drawIndices` and `drawIndexCount`.
+
 - App keys (`keyPressed`, `keyHeld`, `shortcut`, `primaryShortcut`) are
   suppressed only while a text field is focused, not while any widget is:
   a clicked button no longer swallows Ctrl+S. Tables take focus and Tab,

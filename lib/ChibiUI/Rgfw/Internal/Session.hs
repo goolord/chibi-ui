@@ -31,7 +31,7 @@ import Foreign.Ptr (castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Clock (getMonotonicTime)
 import qualified System.Environment
-import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), texGlyphAtlas, vertexSize)
+import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, texAtlas)
 import ChibiUI.Internal.Context
   ( Context (..)
   , newContext
@@ -265,13 +265,12 @@ dumpFrame renderer font dd path w h = do
   -- P6 stores RGB, while the retained framebuffer is RGBA.
   let rgb = BS.pack [b | (i, b) <- zip [0 :: Int ..] (BS.unpack flipped), i `mod` 4 /= 3]
   BS.writeFile (path ++ ".ppm") (header <> rgb)
-  let glyphCmds = [c | c <- drawCommands dd, cmdTextureId c == texGlyphAtlas]
+  let atlasCmds = [c | c <- drawCommands dd, cmdTextureId c == texAtlas]
   -- The first glyph quad's position and UV, against the atlas ink.
-  uvDump <- case listToMaybe glyphCmds of
-    Nothing -> pure ("no glyph cmd" :: String)
+  uvDump <- case listToMaybe atlasCmds of
+    Nothing -> pure ("no atlas cmd" :: String)
     Just c -> withForeignPtr (drawVertices dd) $ \vp -> do
-      let v0 = fromIntegral (cmdIndexOffset c) :: Int
-          p = castPtr vp `plusPtr` (v0 * vertexSize)
+      let p = castPtr vp `plusPtr` (fromIntegral (cmdFirstQuad c) * quadBytes)
       x <- peekByteOff p 0 :: IO Float
       y <- peekByteOff p 4 :: IO Float
       u <- peekByteOff p 24 :: IO Float
@@ -284,7 +283,7 @@ dumpFrame renderer font dd path w h = do
         ++ " inkMax(x,y)=" ++ show (maxX, maxY)
         ++ " frame: verts=" ++ show (drawVertexCount dd)
         ++ " cmds=" ++ show (length (drawCommands dd))
-        ++ " glyphCmds=" ++ show (length glyphCmds)
+        ++ " atlasCmds=" ++ show (length atlasCmds)
         ++ " | " ++ uvDump
     )
 

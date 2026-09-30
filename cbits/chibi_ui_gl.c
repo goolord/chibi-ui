@@ -1,11 +1,14 @@
 /* OpenGL 3.2 core renderer for the chibi-ui RGFW host.
  *
- * Adapted from nano-ui-rgfw's nano_ui_gl.c. Geometry is the core's shared
- * draw buffer uploaded as-is (32-byte vertices: position, RGBA, UV; 32-bit
- * indices) and drawn per command under a scissor. A command's texture id
- * picks the mode: 0 is flat geometry, 1 the glyph atlas (R8 coverage,
- * tinted by vertex colour), and 2 or more a registered image texture,
- * tinted by vertex colour.
+ * Adapted from nano-ui-rgfw's nano_ui_gl.c. Geometry is the core's vertex
+ * buffer uploaded as-is (32-byte vertices: position, RGBA, UV; four per
+ * quad) and drawn per command under a scissor, through a fixed index
+ * buffer: every quad's two triangles are the same six indices over its
+ * four vertices. A command's texture id picks the mode: 0 is the glyph
+ * atlas (R8 coverage, tinted by vertex colour), where a negative U means
+ * full coverage, so flat geometry shares the mode and batch with text; 1 or
+ * more a registered image texture, tinted by vertex colour; an id with no
+ * texture draws its quads flat.
  *
  * Frames draw into a retained offscreen framebuffer and every present
  * copies it to the window, so a frame can repaint in full and still
@@ -73,6 +76,7 @@ typedef intptr_t GLsizeiptr;
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_STREAM_DRAW 0x88E0
+#define GL_STATIC_DRAW 0x88E4
 #define GL_FRAGMENT_SHADER 0x8B30
 #define GL_VERTEX_SHADER 0x8B31
 #define GL_COMPILE_STATUS 0x8B81
@@ -137,10 +141,10 @@ typedef struct ngl_api {
 #undef X
 } ngl_api;
 
-/* Must match the core's vertexSize / indexSize. */
+/* Must match the core's vertexSize. Indices are 32-bit, six per quad. */
 enum { NGL_VERTEX_BYTES = 32, NGL_INDEX_BYTES = 4 };
 
-enum { NGL_MODE_NONE, NGL_MODE_GEOMETRY, NGL_MODE_GLYPH, NGL_MODE_IMAGE };
+enum { NGL_MODE_NONE, NGL_MODE_ATLAS, NGL_MODE_IMAGE, NGL_MODE_FLAT };
 
 /* Registered images. Ids come from the view; the array holds one texture
  * per id up to the cap. */
@@ -151,6 +155,7 @@ typedef struct chibi_ui_gl {
   GLuint program;
   GLint uViewport, uScale, uTextured, uAtlas, uImages;
   GLuint geomVao, geomVbo, geomEbo;
+  uint32_t eboQuads; /* quads the fixed index buffer covers */
   GLuint atlas;
   GLuint imgTex[NGL_MAX_IMAGES];
   GLuint retainFbo, retainTex;
@@ -187,9 +192,11 @@ static const char* ngl_fragment_src =
     "out vec4 fragColor;\n"
     "void main() {\n"
     "  if (uTextured > 1.5) {\n"
+    "    fragColor = vColor;\n"
+    "  } else if (uTextured > 0.5) {\n"
     "    fragColor = texture(uImages, vUV) * vColor;\n"
     "  } else {\n"
-    "    float coverage = uTextured > 0.5 ? texture(uAtlas, vUV).r : 1.0;\n"
+    "    float coverage = vUV.x < 0.0 ? 1.0 : texture(uAtlas, vUV).r;\n"
     "    fragColor = vec4(vColor.rgb, vColor.a * coverage);\n"
     "  }\n"
     "}\n";
@@ -436,10 +443,14 @@ int32_t chibi_ui_gl_begin(chibi_ui_gl* r, int32_t fbW, int32_t fbH, float scale,
   gl->BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
   gl->UseProgram(r->program);
   gl->Uniform2f(r->uViewport, (GLfloat)r->fbW, (GLfloat)r->fbH);
+  gl->Uniform1f(r->uScale, r->scale);
   gl->ActiveTexture(GL_TEXTURE1);
   gl->BindTexture(GL_TEXTURE_2D, 0);
   gl->ActiveTexture(GL_TEXTURE0);
   gl->BindTexture(GL_TEXTURE_2D, r->atlas);
+  gl->BindVertexArray(r->geomVao);
+  /* Every draw and region clear sets its own scissor. */
+  gl->Enable(GL_SCISSOR_TEST);
   return 1;
 }
 
@@ -451,11 +462,9 @@ int32_t chibi_ui_gl_begin(chibi_ui_gl* r, int32_t fbW, int32_t fbH, float scale,
 void chibi_ui_gl_clear_region(chibi_ui_gl* r, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
                               float red, float green, float blue) {
   ngl_api* gl = &r->gl;
-  gl->Enable(GL_SCISSOR_TEST);
   gl->Scissor(x0, r->fbH - y1, x1 - x0, y1 - y0);
   gl->ClearColor(red, green, blue, 1.0f);
   gl->Clear(GL_COLOR_BUFFER_BIT);
-  gl->Disable(GL_SCISSOR_TEST);
 }
 
 /* Copy the retained frame to the window's back buffer. The caller swaps. */
@@ -479,53 +488,71 @@ void chibi_ui_gl_read_retained(chibi_ui_gl* r, uint8_t* out) {
   gl->BindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void chibi_ui_gl_upload_geometry(chibi_ui_gl* r, const void* vertices, int32_t vertexCount,
-                                 const void* indices, int32_t indexCount) {
+/* Grow the fixed index buffer to cover at least `quads` quads: quad k's
+ * triangles are 4k+0, 4k+1, 4k+2 and 4k+0, 4k+2, 4k+3. Returns 0 when out
+ * of memory, leaving the old buffer. The vertex array must be bound. */
+static int ngl_ensure_indices(chibi_ui_gl* r, uint32_t quads) {
   ngl_api* gl = &r->gl;
-  r->mode = NGL_MODE_NONE;
+  if (quads <= r->eboQuads) return 1;
+  uint32_t cap = r->eboQuads * 2 > quads ? r->eboQuads * 2 : quads;
+  if (cap < 1024) cap = 1024;
+  uint32_t* idx = (uint32_t*)malloc((size_t)cap * 6 * NGL_INDEX_BYTES);
+  if (idx == NULL) return 0;
+  for (uint32_t k = 0; k < cap; k++) {
+    uint32_t v = k * 4;
+    uint32_t* q = idx + (size_t)k * 6;
+    q[0] = v;
+    q[1] = v + 1;
+    q[2] = v + 2;
+    q[3] = v;
+    q[4] = v + 2;
+    q[5] = v + 3;
+  }
+  gl->BindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->geomEbo);
+  gl->BufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)cap * 6 * NGL_INDEX_BYTES, idx,
+                 GL_STATIC_DRAW);
+  free(idx);
+  r->eboQuads = cap;
+  return 1;
+}
+
+/* Upload the frame's vertices, four per quad, and make sure the fixed
+ * index buffer covers every quad. */
+void chibi_ui_gl_upload_geometry(chibi_ui_gl* r, const void* vertices, int32_t vertexCount) {
+  ngl_api* gl = &r->gl;
   gl->BindVertexArray(r->geomVao);
   gl->BindBuffer(GL_ARRAY_BUFFER, r->geomVbo);
   gl->BufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertexCount * NGL_VERTEX_BYTES,
                  vertexCount > 0 ? vertices : NULL, GL_STREAM_DRAW);
-  gl->BindBuffer(GL_ELEMENT_ARRAY_BUFFER, r->geomEbo);
-  gl->BufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)indexCount * NGL_INDEX_BYTES,
-                 indexCount > 0 ? indices : NULL, GL_STREAM_DRAW);
+  if (!ngl_ensure_indices(r, (uint32_t)vertexCount / 4))
+    fprintf(stderr, "chibi-ui: out of memory for the index buffer\n");
 }
 
-/* Draw one command's index range. The clip is in top-left physical pixels,
+/* Draw one command's quads. The clip is in top-left physical pixels,
  * already intersected with the framebuffer; vertices are logical and
  * scaled in the vertex shader by the frame's scale. The texture id picks
- * the mode: 0 flat, 1 the glyph atlas, 2+ image id - 2. */
+ * the mode: 0 the atlas, 1+ image id - 1, flat while that image has no
+ * texture. Quads past what the index buffer covers are skipped. */
 void chibi_ui_gl_draw_geometry(chibi_ui_gl* r, int32_t x0, int32_t y0, int32_t x1, int32_t y1,
-                               uint32_t firstIndex, uint32_t indexCount, int32_t textureId) {
+                               uint32_t firstQuad, uint32_t quadCount, int32_t textureId) {
   ngl_api* gl = &r->gl;
-  int imageId = textureId >= 2 ? textureId - 2 : -1;
-  int mode = textureId == 1 ? NGL_MODE_GLYPH
-             : imageId >= 0 ? NGL_MODE_IMAGE
-                            : NGL_MODE_GEOMETRY;
+  int imageId = textureId >= 1 ? textureId - 1 : -1;
+  int mode = imageId >= 0 ? NGL_MODE_IMAGE : NGL_MODE_ATLAS;
   if (mode == NGL_MODE_IMAGE && (imageId >= NGL_MAX_IMAGES || r->imgTex[imageId] == 0))
-    mode = NGL_MODE_GEOMETRY;
+    mode = NGL_MODE_FLAT;
+  if (firstQuad >= r->eboQuads) return;
+  if (quadCount > r->eboQuads - firstQuad) quadCount = r->eboQuads - firstQuad;
   if (r->mode != mode) {
-    gl->BindVertexArray(r->geomVao);
-    gl->Uniform1f(r->uScale, r->scale);
-    gl->Enable(GL_SCISSOR_TEST);
-    gl->Uniform1f(r->uTextured, mode == NGL_MODE_IMAGE ? 2.0f
-                               : mode == NGL_MODE_GLYPH ? 1.0f
-                                                        : 0.0f);
-    if (mode == NGL_MODE_IMAGE) {
-      gl->ActiveTexture(GL_TEXTURE1);
-      gl->BindTexture(GL_TEXTURE_2D, r->imgTex[imageId]);
-      gl->ActiveTexture(GL_TEXTURE0);
-      r->boundImage = imageId;
-    }
+    gl->Uniform1f(r->uTextured, mode == NGL_MODE_FLAT ? 2.0f : mode == NGL_MODE_IMAGE ? 1.0f : 0.0f);
     r->mode = mode;
-  } else if (mode == NGL_MODE_IMAGE && r->boundImage != imageId) {
+  }
+  if (mode == NGL_MODE_IMAGE && r->boundImage != imageId) {
     gl->ActiveTexture(GL_TEXTURE1);
     gl->BindTexture(GL_TEXTURE_2D, r->imgTex[imageId]);
     gl->ActiveTexture(GL_TEXTURE0);
     r->boundImage = imageId;
   }
   gl->Scissor(x0, r->fbH - y1, x1 - x0, y1 - y0);
-  gl->DrawElements(GL_TRIANGLES, (GLsizei)indexCount, GL_UNSIGNED_INT,
-                   (const void*)((uintptr_t)firstIndex * NGL_INDEX_BYTES));
+  gl->DrawElements(GL_TRIANGLES, (GLsizei)(quadCount * 6), GL_UNSIGNED_INT,
+                   (const void*)((uintptr_t)firstQuad * 6 * NGL_INDEX_BYTES));
 }

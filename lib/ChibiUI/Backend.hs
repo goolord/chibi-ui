@@ -23,8 +23,7 @@ module ChibiUI.Backend
   , trackFrame
   , DrawData (..)
   , DrawCmd (..)
-  , texFlat
-  , texGlyphAtlas
+  , texAtlas
   , texImage
   , Input (..)
   , Key (..)
@@ -54,7 +53,7 @@ module ChibiUI.Backend
 
 import ChibiUI.Internal.Context
 import ChibiUI.Internal.Damage (Damage (..), FrameSnapshot, frameDamage, takeSnapshot, trackFrame)
-import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), texFlat, texGlyphAtlas, texImage)
+import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), texAtlas, texImage)
 import ChibiUI.Internal.Font (Font, embeddedFont, fontFree, fontSetScale, newFont)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
