@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 -- | Text: RFont rasterizes the embedded TrueType font (a subset of Inter)
 -- into one coverage atlas, and text draws as glyph quads from it. One font
@@ -33,7 +34,6 @@ import Data.IntMap.Strict (IntMap)
 import qualified Data.IntMap.Strict as IM
 import Data.IORef
 import Data.Text (Text)
-import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import Data.Word (Word8, Word32)
 import Foreign.Marshal.Alloc (allocaBytes)
@@ -218,15 +218,15 @@ fontMeasure f t = do
   let end = TU.lengthWord8 t
       go !ms !acc !i
         | i >= end = pure acc
-        | otherwise = case TU.iter t i of
-            TU.Iter c d
-              | c == ' ' || c == '\t' -> go ms (acc + sa) (i + d)
-              | c == '\n' || c == '\r' -> go ms acc (i + d)
-              | otherwise -> case IM.findWithDefault missGlyph (fromEnum c) ms of
+        | otherwise = case charAt t i of
+            (# cp, d #)
+              | cp == cpSpace || cp == cpTab -> go ms (acc + sa) (i + d)
+              | cp == cpLF || cp == cpCR -> go ms acc (i + d)
+              | otherwise -> case IM.findWithDefault missGlyph cp ms of
                   g
                     | gdAdvance g >= 0 -> go ms (acc + gdAdvance g) (i + d)
                     | otherwise -> do
-                        (ms', g') <- rasterizeInto ms f c
+                        (ms', g') <- rasterizeInto ms f cp
                         go ms' (acc + max 0 (gdAdvance g')) (i + d)
   dev <- go glyphs 0 0
   pure (dev * recip scale)
@@ -236,10 +236,26 @@ fontMeasure f t = do
 missGlyph :: GlyphDev
 missGlyph = GlyphDev 0 0 0 0 0 0 0 0 (-1)
 
+-- Code points the walker dispatches on, without constructing a 'Char'.
+cpSpace, cpTab, cpLF, cpCR :: Int
+cpSpace = 32
+cpTab = 9
+cpLF = 10
+cpCR = 13
+
+-- | Decode the character at byte offset @i@ as @(code point, byte length)@.
+-- The unboxed pair keeps the measure and draw loops comparing code points
+-- as ints, with no 'Char' boxing at the loop boundary; @iter@ itself is
+-- CPR-optimized in text, so the decode allocates nothing either.
+{-# INLINE charAt #-}
+charAt :: Text -> Int -> (# Int, Int #)
+charAt t !i = case TU.iter t i of
+  TU.Iter c d -> (# fromEnum c, d #)
+
 -- | Rasterize a code point, add it to the font's cache, and return the
 -- glyph with the updated map.
-rasterizeInto :: IntMap GlyphDev -> Font -> Char -> IO (IntMap GlyphDev, GlyphDev)
-rasterizeInto glyphs f c = do
+rasterizeInto :: IntMap GlyphDev -> Font -> Int -> IO (IntMap GlyphDev, GlyphDev)
+rasterizeInto glyphs f cp = do
   h <- readIORef (fHandle f)
   g <-
     if h == nullPtr
@@ -247,10 +263,10 @@ rasterizeInto glyphs f c = do
       else do
         sizeD <- currentSize f
         allocaBytes glyphBytes $ \p -> do
-          c_glyph h (fromIntegral (fromEnum c)) sizeD p
+          c_glyph h (fromIntegral cp) sizeD p
           peekGlyph p
-  g `seq` writeIORef (fGlyphs f) (IM.insert (fromEnum c) g glyphs)
-  pure (IM.insert (fromEnum c) g glyphs, g)
+  g `seq` writeIORef (fGlyphs f) (IM.insert cp g glyphs)
+  pure (IM.insert cp g glyphs, g)
 
 -- | Draw one line of text as glyph quads into the draw arena, with the
 -- line box's top-left at the logical pen. Baseline math follows RFont's:
@@ -280,15 +296,15 @@ fontDrawText f arena penX penY col t = do
         end = TU.lengthWord8 t
         go !ms !pen !i
           | i >= end = pure ()
-          | otherwise = case TU.iter t i of
-              TU.Iter c d
-                | c == '\n' || c == '\r' -> go ms pen (i + d)
-                | c == ' ' || c == '\t' -> go ms (pen + sa) (i + d)
-                | otherwise -> case IM.findWithDefault missGlyph (fromEnum c) ms of
+          | otherwise = case charAt t i of
+              (# cp, d #)
+                | cp == cpLF || cp == cpCR -> go ms pen (i + d)
+                | cp == cpSpace || cp == cpTab -> go ms (pen + sa) (i + d)
+                | otherwise -> case IM.findWithDefault missGlyph cp ms of
                     g ->
                       if gdAdvance g < 0
                         then do
-                          (ms', g') <- rasterizeInto ms f c
+                          (ms', g') <- rasterizeInto ms f cp
                           if gdAdvance g' < 0
                             then go ms' pen (i + d) -- no font; skip it
                             else go ms' pen i -- retry as a hit, emitting it

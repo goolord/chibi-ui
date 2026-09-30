@@ -4,7 +4,6 @@ module ChibiUI.Internal.Menu
 
 import Control.Monad (forM_, when)
 import Data.IORef
-import qualified Data.IntMap.Strict as IM
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import ChibiUI.Internal.Context (Context (..), Popup (..), noWidget)
@@ -13,6 +12,7 @@ import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (lsLast)
 import ChibiUI.Internal.Monad
+import ChibiUI.Internal.RectTable (lookupRect, memberRect)
 import ChibiUI.Internal.Style
 import ChibiUI.Internal.Types
 
@@ -32,7 +32,7 @@ openContextMenu wid r items = do
   inp <- getInput
   hov <- hovered r
   focus <- liftIO (readIORef (ctxFocus ctx))
-  focusRect <- liftIO (IM.lookup (slotOf focus) <$> readIORef (ctxRects ctx))
+  focusRect <- liftIO (readIORef (ctxRects ctx) >>= \t -> lookupRect t (slotOf focus))
   let focused = focus == wid || (focus /= noWidget && focusRect == Just r)
   let keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
   when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $ do
@@ -108,7 +108,7 @@ paintPopup inp = do
   ctx <- askContext
   current <- liftIO (readIORef (ctxPopup ctx))
   forM_ current $ \popup -> do
-    exists <- liftIO (IM.member (slotOf (popupOwner popup)) <$> readIORef (ctxRects ctx))
+    exists <- liftIO (readIORef (ctxRects ctx) >>= \t -> memberRect t (slotOf (popupOwner popup)))
     if not exists
       then liftIO (writeIORef (ctxPopup ctx) Nothing)
       else do

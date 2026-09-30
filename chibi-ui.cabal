@@ -33,7 +33,10 @@ common extensions
         OverloadedStrings
 
 common warnings
+    -- -O2 lets the draw and text loops unbox fully: at -O1 the glyph walk
+    -- and measure keep a small per-character allocation that -O2 removes.
     ghc-options:
+        -O2
         -Wall
         -Wextra
         -Wcompat
@@ -65,6 +68,7 @@ library
         ChibiUI.Internal.Input
         ChibiUI.Internal.Layout
         ChibiUI.Internal.Monad
+        ChibiUI.Internal.RectTable
         ChibiUI.Internal.Store
         ChibiUI.Internal.Style
         ChibiUI.Internal.Types

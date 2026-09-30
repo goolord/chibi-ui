@@ -5,7 +5,7 @@
 module ChibiUI.Internal.Id
   ( WidgetId (..)
   , IdContext (..)
-  , initialIdContext
+  , initialIdPath
   , idContextWidgetId
   , hashWidgetId
   , mix64
@@ -30,9 +30,9 @@ data IdContext = IdContext
   }
   deriving stock (Eq, Show)
 
--- | Root path and sibling position used at the start of each view pass.
-initialIdContext :: IdContext
-initialIdContext = IdContext 0x243F6A8885A308D3 0
+-- | The root scope's path hash, used at the start of each view pass.
+initialIdPath :: Word64
+initialIdPath = 0x243F6A8885A308D3
 
 -- | Id of the next sibling in this context. A zero hash becomes 1, so
 -- @WidgetId 0@ never names a real widget.

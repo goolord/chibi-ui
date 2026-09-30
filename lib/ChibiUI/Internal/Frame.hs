@@ -11,11 +11,12 @@ import Data.Maybe (fromMaybe)
 import GHC.Clock (getMonotonicTime)
 import ChibiUI.Internal.Context (Context (..), noWidget)
 import ChibiUI.Internal.Draw
-import ChibiUI.Internal.Id (WidgetId, initialIdContext)
+import ChibiUI.Internal.Id (WidgetId, initialIdPath)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Menu (processPopup, paintPopup)
 import ChibiUI.Internal.Layout (LayoutState (..), freshLayout)
+import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
 import ChibiUI.Internal.Types (Rect (..), Size (..))
 
@@ -25,10 +26,13 @@ import ChibiUI.Internal.Types (Rect (..), Size (..))
 -- the view draws everything else.
 runFrame :: Context model -> Input -> ChibiUI model a -> IO (a, DrawData)
 runFrame ctx inp view = do
-  -- Last frame's geometry becomes the hit-test map; this frame records afresh.
+  -- Last frame's geometry becomes the hit-test map; this frame records
+  -- afresh. The two tables trade places: the older one clears for reuse.
   rects <- readIORef (ctxRects ctx)
+  stale <- readIORef (ctxPrevRects ctx)
+  clearRectTable stale
   writeIORef (ctxPrevRects ctx) rects
-  writeIORef (ctxRects ctx) mempty
+  writeIORef (ctxRects ctx) stale
   resetDrawArena (ctxArena ctx)
   pushClip (ctxArena ctx) (Rect 0 0 (sizeW (inputWindowSize inp)) (sizeH (inputWindowSize inp)))
   writeIORef (ctxFocusRequested ctx) False
@@ -37,7 +41,8 @@ runFrame ctx inp view = do
   writeIORef (ctxFrameRequest ctx) False
   -- Widget ids count from the root again, so the same view derives the
   -- same ids every frame.
-  writeIORef (ctxIdCtx ctx) initialIdContext
+  writeIORef (ctxIdPath ctx) initialIdPath
+  writeIORef (ctxIdSib ctx) 0
   writeIORef (ctxInput ctx) inp
   writeIORef (ctxInputBlocked ctx) False
   t <- getMonotonicTime

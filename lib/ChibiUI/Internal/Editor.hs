@@ -9,16 +9,23 @@ module ChibiUI.Internal.Editor
 import Data.Char (isAlphaNum, isPrint, isSpace)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
 import System.Info (os)
 import ChibiUI.Internal.Input
 
 data EditState = EditState {editText :: !Text, editCaret :: !Int, editAnchor :: !Int}
   deriving (Eq, Show)
 
+-- | Each undo step keeps the whole text (a 'Text' edit copies), so a
+-- history entry also carries its byte size, cached when the entry is
+-- pushed. 'remember' can then bound what a field retains without walking
+-- old texts again.
+type HistoryEntry = (EditState, Int)
+
 data Editor = Editor
   { editState :: !EditState
-  , editUndo :: ![EditState]
-  , editRedo :: ![EditState]
+  , editUndo :: ![HistoryEntry]
+  , editRedo :: ![HistoryEntry]
   } deriving (Eq, Show)
 
 data Motion = Backward | Forward | WordBackward | WordForward | Start | End
@@ -72,9 +79,30 @@ replace raw ed =
           editUndo = if t == editText s then editUndo ed else remember s (editUndo ed),
           editRedo = if t == editText s then editRedo ed else []}
 
--- Force the bounded spine so lazy take thunks cannot retain older history.
-remember :: EditState -> [EditState] -> [EditState]
-remember s history = let kept = take 100 (s : history) in length kept `seq` kept
+-- | Push an undo step, bounded two ways: at most 'undoDepth' states, and
+-- at most 'undoBudget' bytes of retained text across them, so editing a
+-- large document keeps a working undo without holding unbounded copies.
+-- The budget drops the oldest states; sizes are cached per entry, so
+-- pushing is list arithmetic, not text walking. The spine is forced so
+-- lazy takes cannot retain older history.
+remember :: EditState -> [HistoryEntry] -> [HistoryEntry]
+remember s history =
+  let kept = take undoDepth (entryOf s : history)
+      retained = scanl (+) (snd (entryOf s)) (map snd history)
+      withinBudget = [e | (c, e) <- zip retained kept, c <= undoBudget]
+   in length withinBudget `seq` withinBudget
+
+-- | An undo step with its cached text size.
+entryOf :: EditState -> HistoryEntry
+entryOf s = (s, TU.lengthWord8 (editText s))
+
+-- | Undo steps kept per field.
+undoDepth :: Int
+undoDepth = 100
+
+-- | Total edited text a field's undo history may retain, in bytes.
+undoBudget :: Int
+undoBudget = 262144
 
 -- | Logical lines with character offsets, including a trailing empty line.
 textLines :: Text -> [(Int, Text)]
@@ -130,10 +158,10 @@ command cmd ed = case cmd of
      in if editText (editState result) == editText s then result
         else result {editUndo = remember s (editUndo ed)}
   Undo -> case editUndo ed of
-    x : xs -> Editor x xs (s : editRedo ed)
+    (x, _) : xs -> Editor x xs (entryOf s : editRedo ed)
     [] -> ed
   Redo -> case editRedo ed of
-    x : xs -> Editor x (s : editUndo ed) xs
+    (x, _) : xs -> Editor x (entryOf s : editUndo ed) xs
     [] -> ed
   _ -> ed
   where

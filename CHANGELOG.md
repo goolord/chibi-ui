@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Cut steady-state allocation roughly in half again (demo view idle
+  frames: about 200 KB to about 90 KB per frame; motion and typing frames
+  by similar margins; minor GCs per run: 71 to 29), with identical
+  geometry, damage decisions, and widget behavior. The draw arena now
+  tracks its open batch in unboxed counters, so a quad that continues its
+  batch allocates nothing: command closure, index-count boxes, and the
+  per-quad keep-alive are gone, with base pointers cached between
+  growths. Widget ids advance two plain counters instead of rebuilding an
+  id-context record per widget. Per-frame widget rects moved from a
+  rebuilt `IntMap` to a reusable open-addressing table the context clears
+  in place, which also stops the whole previous map becoming garbage each
+  frame. Field and scroll state slots skip writes whose value did not
+  change, layout bounds unboxed into the cursor state, damage batch
+  comparison streams field-wise without building tuple lists, and the
+  library builds at `-O2`. Undo history is now bounded not just to 100
+  states but to 256 KB of retained text per field, with sizes cached per
+  entry so pushing stays list arithmetic.
 - Reduced per-frame allocation churn roughly 70% on the demo UI (idle
   frames: about 690 KB to about 200 KB allocated per frame; minor GCs per
   thousand frames: 222 to 71), with identical geometry, damage decisions,

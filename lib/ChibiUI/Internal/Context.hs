@@ -20,15 +20,16 @@ module ChibiUI.Internal.Context
 
 import Control.Monad (join)
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntMap.Strict as IM
 import Data.IORef
 import qualified Data.ByteString as BS
 import Data.Text (Text)
+import Data.Word (Word64)
 import ChibiUI.Internal.Draw (DrawArena, newDrawArena)
 import ChibiUI.Internal.Font (Font, embeddedFont, fontSetScale, newFont)
-import ChibiUI.Internal.Id (IdContext, WidgetId (..), initialIdContext)
+import ChibiUI.Internal.Id (WidgetId (..), initialIdPath)
 import ChibiUI.Internal.Input (Input, UiCursorKind (..), emptyInput)
 import ChibiUI.Internal.Layout (LayoutState, freshLayout)
+import ChibiUI.Internal.RectTable (RectTable, newRectTable, rectTableToList)
 import ChibiUI.Internal.Store (WidgetStore, emptyWidgetStore)
 import ChibiUI.Internal.Style (Theme, defaultTheme)
 import ChibiUI.Internal.Types (Rect, V2)
@@ -67,10 +68,10 @@ data Context model = Context
   , ctxTheme :: !(IORef Theme)
   , ctxInput :: !(IORef Input)
   , ctxStore :: !(IORef WidgetStore)
-  , ctxRects :: !(IORef (IntMap Rect))
+  , ctxRects :: !(IORef RectTable)
   -- ^ This frame's widget rects, keyed by hashed id. The frame start moves
-  -- it to 'ctxPrevRects' for hit tests and Tab.
-  , ctxPrevRects :: !(IORef (IntMap Rect))
+  -- it to 'ctxPrevRects' for hit tests and Tab; the tables trade places.
+  , ctxPrevRects :: !(IORef RectTable)
   , ctxFocus :: !(IORef WidgetId)
   , ctxFocusRequested :: !(IORef Bool)
   -- ^ Whether a widget claimed focus this frame; a click that claims none
@@ -90,7 +91,12 @@ data Context model = Context
   -- ^ A view asked for another frame; otherwise the loop blocks on input.
   , ctxArena :: !DrawArena
   , ctxLayout :: !(IORef LayoutState)
-  , ctxIdCtx :: !(IORef IdContext)
+  , ctxIdPath :: !(IORef Word64)
+  -- ^ The current scope's path hash. Split from 'ctxIdSib' into two
+  -- references, so handing out an id advances one counter without
+  -- allocating a context record per widget.
+  , ctxIdSib :: !(IORef Word64)
+  -- ^ The next sibling's position within the current scope.
   , ctxImages :: !(IORef (IntMap ImageEntry))
   , ctxClipboardGet :: !(IORef (IO (Maybe Text)))
   , ctxClipboardPut :: !(IORef (Text -> IO ()))
@@ -125,8 +131,8 @@ newContext initial = do
   theme <- newIORef defaultTheme
   input <- newIORef emptyInput
   store <- newIORef emptyWidgetStore
-  rects <- newIORef mempty
-  prevRects <- newIORef mempty
+  rects <- newRectTable >>= newIORef
+  prevRects <- newRectTable >>= newIORef
   focus <- newIORef noWidget
   focusReq <- newIORef False
   focusables <- newIORef []
@@ -137,7 +143,8 @@ newContext initial = do
   frameReq <- newIORef False
   arena <- newDrawArena
   layout <- newIORef freshLayout
-  idCtx <- newIORef initialIdContext
+  idPath <- newIORef initialIdPath
+  idSib <- newIORef 0
   images <- newIORef mempty
   clipGet <- newIORef (pure Nothing)
   clipPut <- newIORef (\_ -> pure ())
@@ -162,10 +169,11 @@ newContext initial = do
       , ctxTime = time
       , ctxQuit = quit
       , ctxFrameRequest = frameReq
-      , ctxArena = arena
-      , ctxLayout = layout
-      , ctxIdCtx = idCtx
-      , ctxImages = images
+       , ctxArena = arena
+       , ctxLayout = layout
+       , ctxIdPath = idPath
+       , ctxIdSib = idSib
+       , ctxImages = images
       , ctxClipboardGet = clipGet
       , ctxClipboardPut = clipPut
       }
@@ -202,7 +210,7 @@ contextInput = readIORef . ctxInput
 
 -- | Recorded widget geometry for hosts and tests.
 frameRects :: Context model -> IO [(Int, Rect)]
-frameRects ctx = IM.toList <$> readIORef (ctxRects ctx)
+frameRects ctx = readIORef (ctxRects ctx) >>= rectTableToList
 
 -- | The system clipboard's text, if it holds any.
 readClipboard :: Context model -> IO (Maybe Text)

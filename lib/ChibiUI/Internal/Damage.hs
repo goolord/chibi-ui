@@ -101,13 +101,12 @@ takeSnapshot dd = do
 frameDamage :: FrameSnapshot -> DrawData -> Size -> IO Damage
 frameDamage snap dd window = do
   let newQuads = drawIndexCount dd `div` 6
-      newBatches = [(cmdRect c, cmdTextureId c) | c <- drawCommands dd]
   same <- vertexBytesEq (snapVertices snap) dd
-  if newQuads == snapQuadCount snap && newBatches == snapBatches snap && same
+  if newQuads == snapQuadCount snap && same
+    && batchesEq (snapBatches snap) (drawCommands dd)
     then pure DamageNone
     else
-      if length newBatches == length (snapBatches snap)
-        && or (zipWith (/=) newBatches (snapBatches snap))
+      if batchesInPlace (snapBatches snap) (drawCommands dd)
         then pure DamageFull
         else do
           let oldN = snapQuadCount snap
@@ -115,6 +114,32 @@ frameDamage snap dd window = do
           newVerts <- copyVertices dd
           rects <- changedQuadRects (snapVertices snap) newVerts n oldN newQuads
           pure (maybe DamageFull (mergeDamage window) rects)
+
+-- | Whether the frame's batches equal the snapshot's, element for element,
+-- compared field-wise without materializing anything.
+batchesEq :: [(Rect, Int)] -> [DrawCmd] -> Bool
+batchesEq (s : ss) (c : cs) = batchEq s c && batchesEq ss cs
+batchesEq [] [] = True
+batchesEq _ _ = False
+
+-- | Whether one batch pair differs in clip or texture.
+batchEq :: (Rect, Int) -> DrawCmd -> Bool
+batchEq (Rect x y w h, t) c =
+  cmdClipX c == x
+    && cmdClipY c == y
+    && cmdClipW c == w
+    && cmdClipH c == h
+    && cmdTextureId c == t
+
+-- | Whether the two batch lists have equal lengths with a batch that
+-- changed in place: same structure, different clip or texture somewhere,
+-- which can repaint different pixels over identical geometry.
+batchesInPlace :: [(Rect, Int)] -> [DrawCmd] -> Bool
+batchesInPlace = walk False
+  where
+    walk !diff (s : ss) (c : cs) = walk (diff || not (batchEq s c)) ss cs
+    walk diff [] [] = diff
+    walk _ _ _ = False
 
 -- | Whether the frame's used vertex prefix equals the snapshot's bytes,
 -- compared in place: the arena's buffer against the snapshot's copy.

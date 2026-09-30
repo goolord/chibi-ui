@@ -4,6 +4,9 @@
 -- as four floats, and UV, so the C renderer needs no adaptation beyond its
 -- name. Texture ids: 0 is flat geometry, 1 the glyph atlas, and 2 or more
 -- are backend-registered images.
+{-# LANGUAGE UnboxedTuples #-}
+{-# LANGUAGE MagicHash #-}
+
 module ChibiUI.Internal.Draw
   ( DrawArena
   , DrawCmd (..)
@@ -25,12 +28,15 @@ module ChibiUI.Internal.Draw
   , indexSize
   ) where
 
+import Control.Monad (when)
 import Data.IORef
 import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (ForeignPtr, mallocForeignPtrBytes, withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import Foreign.Storable (peekByteOff, pokeByteOff)
+import Foreign.Storable (pokeByteOff)
+import GHC.Exts (Int (..), MutableByteArray#, RealWorld, newByteArray#, readIntArray#, writeIntArray#)
+import GHC.IO (IO (IO))
 import ChibiUI.Internal.Types
   ( Color (..)
   , Rect (..)
@@ -38,8 +44,31 @@ import ChibiUI.Internal.Types
   , colorB
   , colorG
   , colorR
-  , rectIntersect
   )
+
+-- | One unboxed mutable 'Int' cell. The arena's per-quad counters live in
+-- these because an @IORef Int@ writes a freshly boxed 'Int' on every
+-- update, which at a quad per glyph is real garbage; these write in place.
+data URef = URef !(MutableByteArray# RealWorld)
+
+{-# INLINE newURef #-}
+newURef :: Int -> IO URef
+newURef (I# n#) =
+  IO $ \s -> case newByteArray# 8# s of
+    (# s', cell #) -> case writeIntArray# cell 0# n# s' of
+      s'' -> (# s'', URef cell #)
+
+{-# INLINE readURef #-}
+readURef :: URef -> IO Int
+readURef (URef cell) =
+  IO $ \s -> case readIntArray# cell 0# s of
+    (# s', n# #) -> (# s', I# n# #)
+
+{-# INLINE writeURef #-}
+writeURef :: URef -> Int -> IO ()
+writeURef (URef cell) (I# n#) =
+  IO $ \s -> case writeIntArray# cell 0# n# s of
+    s' -> (# s', () #)
 
 -- | Packed vertex stride in bytes: 32.
 vertexSize :: Int
@@ -89,15 +118,31 @@ data DrawData = DrawData
 -- friends; snapshot with 'finishFrame'.
 data DrawArena = DrawArena
   { daVertex :: !(IORef (ForeignPtr Word8))
+  , daVertexPtr :: !(IORef (Ptr Word8))
+  -- ^ The vertex buffer's base address, cached so quad emission writes
+  -- through it without a keep-alive per quad. Valid between growths: the
+  -- buffer is pinned memory and the 'ForeignPtr' stays referenced by
+  -- 'daVertex'.
   , daVertexCap :: !(IORef Int)
-  , daVertexCount :: !(IORef Int)
+  , daVertexCount :: !URef
   , daIndex :: !(IORef (ForeignPtr Word8))
+  , daIndexPtr :: !(IORef (Ptr Word32))
+  -- ^ The index buffer's base address, cached as above.
   , daIndexCap :: !(IORef Int)
-  , daIndexCount :: !(IORef Int)
+  , daIndexCount :: !URef
   , daCommands :: !(IORef [DrawCmd])
+  -- ^ Closed batches, most recent first. The batch still being extended
+  -- lives in the @daBatch*@ refs below instead, so a quad that continues
+  -- its batch allocates nothing.
   , daLastClip :: !(IORef Rect)
   , daLastTexture :: !(IORef Int)
   , daClipStack :: !(IORef [Rect])
+  , daBatchClip :: !(IORef Rect)
+  , daBatchTexture :: !(IORef Int)
+  , daBatchStart :: !URef
+  , daBatchCount :: !URef
+  -- ^ The open batch: the clip and texture it runs under, its first index,
+  -- and its index count so far. A count of zero means no batch is open.
   }
 
 -- | A brand-new arena.
@@ -105,6 +150,8 @@ newDrawArena :: IO DrawArena
 newDrawArena = do
   vbuf <- newBuffer 0
   ibuf <- newBuffer 0
+  vptr <- withForeignPtr vbuf (newIORef . castPtr)
+  iptr <- withForeignPtr ibuf (newIORef . (castPtr :: Ptr Word8 -> Ptr Word32))
   vref <- newIORef vbuf
   iref <- newIORef ibuf
   cref <- newIORef []
@@ -113,20 +160,30 @@ newDrawArena = do
   cstack <- newIORef []
   vcap <- newIORef 0
   icap <- newIORef 0
-  vcnt <- newIORef 0
-  icnt <- newIORef 0
+  vcnt <- newURef 0
+  icnt <- newURef 0
+  bclip <- newIORef infiniteClip
+  btex <- newIORef texFlat
+  bstart <- newURef 0
+  bcount <- newURef 0
   pure
     DrawArena
       { daVertex = vref
+      , daVertexPtr = vptr
       , daVertexCap = vcap
       , daVertexCount = vcnt
       , daIndex = iref
+      , daIndexPtr = iptr
       , daIndexCap = icap
       , daIndexCount = icnt
       , daCommands = cref
       , daLastClip = lcref
       , daLastTexture = ltref
       , daClipStack = cstack
+      , daBatchClip = bclip
+      , daBatchTexture = btex
+      , daBatchStart = bstart
+      , daBatchCount = bcount
       }
 
 newBuffer :: Int -> IO (ForeignPtr Word8)
@@ -140,22 +197,30 @@ infiniteClip = Rect 0 0 1e9 1e9
 -- their capacity.
 resetDrawArena :: DrawArena -> IO ()
 resetDrawArena a = do
-  writeIORef (daVertexCount a) 0
-  writeIORef (daIndexCount a) 0
+  writeURef (daVertexCount a) 0
+  writeURef (daIndexCount a) 0
   writeIORef (daCommands a) []
   writeIORef (daLastClip a) infiniteClip
   writeIORef (daLastTexture a) texFlat
   writeIORef (daClipStack a) []
+  writeIORef (daBatchClip a) infiniteClip
+  writeIORef (daBatchTexture a) texFlat
+  writeURef (daBatchStart a) 0
+  writeURef (daBatchCount a) 0
 
 -- | Snapshot the frame. The arena must not be reset and emitted into again
--- until the backend has rendered or copied the snapshot.
+-- until the backend has rendered or copied the snapshot. Reading the open
+-- batch without closing it keeps the snapshot repeatable.
 finishFrame :: DrawArena -> IO DrawData
 finishFrame a = do
   vfp <- readIORef (daVertex a)
-  vc <- readIORef (daVertexCount a)
+  vc <- readURef (daVertexCount a)
   ifp <- readIORef (daIndex a)
-  ic <- readIORef (daIndexCount a)
-  cmds <- reverse <$> readIORef (daCommands a)
+  ic <- readURef (daIndexCount a)
+  cmds <-
+    do pend <- pendingCmd a
+       closed <- readIORef (daCommands a)
+       pure (reverse (pend ++ closed))
   pure
     DrawData
       { drawVertices = vfp
@@ -165,21 +230,36 @@ finishFrame a = do
       , drawCommands = cmds
       }
 
--- | Grow a buffer to at least @need@ bytes, keeping the old contents.
-growBuffer :: IORef (ForeignPtr Word8) -> IORef Int -> Int -> IO (ForeignPtr Word8)
-growBuffer ref capRef need = do
-  fp <- readIORef ref
+-- | The open batch as a command, if one is open.
+pendingCmd :: DrawArena -> IO [DrawCmd]
+pendingCmd a = do
+  n <- readURef (daBatchCount a)
+  if n <= 0
+    then pure []
+    else do
+      Rect x y w h <- readIORef (daBatchClip a)
+      t <- readIORef (daBatchTexture a)
+      s <- readURef (daBatchStart a)
+      pure [DrawCmd x y w h t (fromIntegral s) (fromIntegral n)]
+
+-- | Grow a buffer to at least @need@ bytes, keeping the old contents and
+-- refreshing the cached base pointer. Inlined, so the steady-state
+-- capacity check allocates nothing.
+{-# INLINE growBuffer #-}
+growBuffer :: IORef (ForeignPtr Word8) -> IORef (Ptr word) -> IORef Int -> Int -> IO ()
+growBuffer fpRef ptrRef capRef !need = do
   cap <- readIORef capRef
   if need <= cap
-    then pure fp
+    then pure ()
     else do
       let cap' = max need (max 4096 (cap * 2))
+      fp <- readIORef fpRef
       fp' <- newBuffer cap'
-      withForeignPtr fp $ \p ->
-        withForeignPtr fp' $ \p' -> copyBytes p' p cap
-      writeIORef ref fp'
+      withForeignPtr fp $ \src ->
+        withForeignPtr fp' $ \dst -> copyBytes dst src cap
+      writeIORef fpRef fp'
       writeIORef capRef cap'
-      pure fp'
+      withForeignPtr fp' $ \p -> writeIORef ptrRef (castPtr p)
 
 -- | The current clip, in window coordinates. Emitters cut every quad to it.
 currentClip :: DrawArena -> IO Rect
@@ -191,8 +271,21 @@ pushClip :: DrawArena -> Rect -> IO ()
 pushClip a r = do
   cur <- readIORef (daLastClip a)
   modifyIORef' (daClipStack a) (cur :)
-  let clipped = maybe (Rect 0 0 0 0) id (rectIntersect cur r)
-  writeIORef (daLastClip a) clipped
+  writeIORef (daLastClip a) (clipIntersect cur r)
+
+-- | The shared positive area of two rectangles, or the empty rectangle at
+-- the origin when they are disjoint or touch edges. Inline, so a push
+-- allocates only the saved clip and the intersection itself.
+{-# INLINE clipIntersect #-}
+clipIntersect :: Rect -> Rect -> Rect
+clipIntersect (Rect x1 y1 w1 h1) (Rect x2 y2 w2 h2) =
+  let !x = max x1 x2
+      !y = max y1 y2
+      !xEnd = min (x1 + w1) (x2 + w2)
+      !yEnd = min (y1 + h1) (y2 + h2)
+   in if xEnd > x && yEnd > y
+        then Rect x y (xEnd - x) (yEnd - y)
+        else Rect 0 0 0 0
 
 -- | Restore the clip pushed last.
 popClip :: DrawArena -> IO ()
@@ -256,40 +349,60 @@ strokeRect a (Rect x y w h) bw c
       fillRect a (Rect (x + w - t) (y + t) t (h - t - b)) c
 
 -- | Write one quad's four vertices; returns the first vertex's index.
+{-# INLINE pushVertices #-}
 pushVertices :: DrawArena -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO Word32
 pushVertices a !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
-  n <- readIORef (daVertexCount a)
-  fp <- growBuffer (daVertex a) (daVertexCap a) ((n + 4) * vertexSize)
-  withForeignPtr fp $ \buf -> writeQuadVertices buf n x0 y0 x1 y1 col u0 v0 u1 v1
-  writeIORef (daVertexCount a) (n + 4)
+  n <- readURef (daVertexCount a)
+  growBuffer (daVertex a) (daVertexPtr a) (daVertexCap a) ((n + 4) * vertexSize)
+  buf <- readIORef (daVertexPtr a)
+  writeQuadVertices buf n x0 y0 x1 y1 col u0 v0 u1 v1
+  writeURef (daVertexCount a) (n + 4)
   pure (fromIntegral n)
 
 -- | The two triangles of a quad, as six indices over its four vertices.
+{-# INLINE pushIndices #-}
 pushIndices :: DrawArena -> Word32 -> IO ()
 pushIndices a !base = do
-  n <- readIORef (daIndexCount a)
-  fp <- growBuffer (daIndex a) (daIndexCap a) ((n + 6) * indexSize)
-  withForeignPtr fp $ \buf -> writeQuadIndices (castPtr buf :: Ptr Word32) n base
-  writeIORef (daIndexCount a) (n + 6)
+  n <- readURef (daIndexCount a)
+  growBuffer (daIndex a) (daIndexPtr a) (daIndexCap a) ((n + 6) * indexSize)
+  buf <- readIORef (daIndexPtr a)
+  writeQuadIndices buf n base
+  writeURef (daIndexCount a) (n + 6)
 
--- | Extend the last command when the batch's clip, texture and index range
--- continue it; else start a new one.
+-- | Extend the open batch when the quad's clip and texture continue it;
+-- else close the open batch into the command list and open a fresh one.
+-- Continuing a batch only bumps a counter, so the common run of quads
+-- under one clip and texture allocates nothing per quad.
+{-# INLINE batchCommand #-}
 batchCommand :: DrawArena -> Rect -> IO ()
 batchCommand a clip = do
   texture <- readIORef (daLastTexture a)
-  idxCount <- readIORef (daIndexCount a)
-  cmds <- readIORef (daCommands a)
-  let idxStart = fromIntegral (idxCount - 6) :: Word32
-  case cmds of
-    (cmd : rest)
-      | cmdClipX cmd == rectX clip
-          && cmdClipY cmd == rectY clip
-          && cmdClipW cmd == rectW clip
-          && cmdClipH cmd == rectH clip
-          && cmdTextureId cmd == texture
-          && cmdIndexOffset cmd + cmdIndexCount cmd == idxStart ->
-          writeIORef (daCommands a) (cmd {cmdIndexCount = cmdIndexCount cmd + 6} : rest)
-    _ -> writeIORef (daCommands a) (DrawCmd (rectX clip) (rectY clip) (rectW clip) (rectH clip) texture idxStart 6 : cmds)
+  idxCount <- readURef (daIndexCount a)
+  let idxStart = idxCount - 6
+  openClip <- readIORef (daBatchClip a)
+  openTex <- readIORef (daBatchTexture a)
+  openCount <- readURef (daBatchCount a)
+  if openCount > 0 && openClip == clip && openTex == texture
+    then writeURef (daBatchCount a) (openCount + 6)
+    else do
+      when (openCount > 0) $ do
+        openStart <- readURef (daBatchStart a)
+        modifyIORef'
+          (daCommands a)
+          ( DrawCmd
+              (rectX openClip)
+              (rectY openClip)
+              (rectW openClip)
+              (rectH openClip)
+              openTex
+              (fromIntegral openStart)
+              (fromIntegral openCount)
+              :
+          )
+      writeIORef (daBatchClip a) clip
+      writeIORef (daBatchTexture a) texture
+      writeURef (daBatchStart a) idxStart
+      writeURef (daBatchCount a) 6
 
 -- | Write four vertices in the C renderer's 32-byte layout: position, RGBA
 -- as four floats, UV. Colour channels come from the packed @0xRRGGBBAA@ word.

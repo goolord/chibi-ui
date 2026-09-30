@@ -185,6 +185,7 @@ data FieldMode = SingleLine | MultiLine | ReadOnly deriving (Eq)
 -- An inactive editor retains undo history; an editing session also owns the
 -- focus-time value. The draft and its cancellation target cannot drift apart.
 data FieldState = Inactive !Editor | Editing !Text !Editor
+  deriving (Eq)
 
 data FieldEvent = BeginEdit !Text | UpdateEdit !Editor | CommitEdit | CancelEdit
 
@@ -250,7 +251,10 @@ editTextField mode wid r value transform = do
         let active = editing next
             reset = if active then id else
               deleteSlot fieldFloat (slotKey SlotTextScrollY k) . deleteSlot fieldFloat (slotKey SlotTextScroll k)
-        storeModify (\st -> ((), insertSlot fieldDyn k (toDyn next) (reset st)))
+        -- An unchanged state keeps its slot: re-inserting an equal value
+        -- rebuilds the store's map for nothing.
+        when (next /= saved) $
+          storeModify (\st -> ((), insertSlot fieldDyn k (toDyn next) (reset st)))
         when (focused && not active) blurFocus
         paint (fieldEditor next) active reveal
   case (focused, state) of
@@ -402,8 +406,10 @@ drawField mode k r ed focused reveal th = do
         if focused && reveal then keepVisible (fromIntegral caretRow * lineHeight) lineHeight (rectH inner) wheelY else wheelY
       top = if multiline then rectY inner - shiftY else alignedTextY (themeTextAlign th) inner
       (a, b) = selection ed
-  storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotTextScroll k) shift st))
-  when multiline $ storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotTextScrollY k) shiftY st))
+  when (shift /= oldShift) $
+    storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotTextScroll k) shift st))
+  when (multiline && shiftY /= oldY) $
+    storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotTextScrollY k) shiftY st))
   withClip inner $ do
     forM_ (zip [0 :: Int ..] ls) $ \(lineIndex, (start, text)) -> do
       let y = top + fromIntegral lineIndex * lineHeight
@@ -529,8 +535,10 @@ scrollColumn body = do
   let contentH = sizeH (Layout.contentSize (V2 (rectX content) (rectY content)) ls1)
       maxScroll = max 0 (contentH - rectH r)
       scroll1 = clamp 0 maxScroll offset
-  storeModify (\st -> ((), insertSlot fieldFloat scrollKey scroll1 st))
-  storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotScrollExtent k) contentH st))
+  when (scroll1 /= scroll0) $
+    storeModify (\st -> ((), insertSlot fieldFloat scrollKey scroll1 st))
+  when (contentH /= extent) $
+    storeModify (\st -> ((), insertSlot fieldFloat (slotKey SlotScrollExtent k) contentH st))
   when (scroll1 /= offset) requestFrame
   -- A scrollbar when the body overflows.
   withClip r $ when (maxScroll > 0) $ do

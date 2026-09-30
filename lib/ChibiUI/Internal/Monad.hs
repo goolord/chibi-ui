@@ -113,6 +113,7 @@ import ChibiUI.Internal.Id
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (LayoutState)
 import qualified ChibiUI.Internal.Layout as Layout
+import ChibiUI.Internal.RectTable (insertRect, lookupRect)
 import ChibiUI.Internal.Store
 import ChibiUI.Internal.Style (Theme (..), TextAlign, alignedTextY, fieldPad)
 import ChibiUI.Internal.Types
@@ -171,12 +172,16 @@ askContext = ask
 -- | This widget's id: the next sibling position hashed into the container's
 -- path. The same widgets must run in the same order every frame, or state
 -- and input follow the wrong widget.
+{-# INLINE nextId #-}
 nextId :: ChibiUI model WidgetId
 nextId = do
   ctx <- ask
-  liftIO $
-    atomicModifyIORef' (ctxIdCtx ctx) $ \(IdContext cid sib) ->
-      (IdContext cid (sib + 1), idContextWidgetId (IdContext cid sib))
+  liftIO $ do
+    cid <- readIORef (ctxIdPath ctx)
+    sib <- readIORef (ctxIdSib ctx)
+    writeIORef (ctxIdSib ctx) (sib + 1)
+    let raw = mix64 cid sib
+    pure (if raw == 0 then WidgetId 1 else WidgetId raw)
 
 -- | Run a container's body: the next sibling position becomes the child
 -- path, and the body's widgets count from a fresh sibling counter.
@@ -193,12 +198,15 @@ withIdScope :: (IdContext -> (IdContext, IdContext)) -> ChibiUI model a -> Chibi
 withIdScope enter body = do
   ctx <- ask
   parent' <- liftIO $ do
-    parent <- readIORef (ctxIdCtx ctx)
+    parent <- IdContext <$> readIORef (ctxIdPath ctx) <*> readIORef (ctxIdSib ctx)
     let (parent', child) = enter parent
-    writeIORef (ctxIdCtx ctx) child
+    writeIORef (ctxIdPath ctx) (currentId child)
+    writeIORef (ctxIdSib ctx) (siblingId child)
     pure parent'
   a <- body
-  liftIO (writeIORef (ctxIdCtx ctx) parent')
+  liftIO $ do
+    writeIORef (ctxIdPath ctx) (currentId parent')
+    writeIORef (ctxIdSib ctx) (siblingId parent')
   pure a
 
 fnv1a :: String -> Word64
@@ -231,6 +239,7 @@ storeRead f = do
 -- | Place a widget at the cursor: take the rectangle its size needs,
 -- advance the cursor past it, and return the rectangle. A 'nextWidth' or
 -- 'nextHeight' override replaces the measured size once.
+{-# INLINE place #-}
 place :: Size -> ChibiUI model Rect
 place sz = do
   gap' <- themeGap <$> theme
@@ -469,7 +478,8 @@ addFocusable :: WidgetId -> ChibiUI model ()
 addFocusable wid = do
   ctx <- ask
   liftIO $ do
-    rect <- IM.lookup (slotOf wid) <$> readIORef (ctxRects ctx)
+    rects <- readIORef (ctxRects ctx)
+    rect <- lookupRect rects (slotOf wid)
     clip <- currentClip (ctxArena ctx)
     when (maybe False (maybe False (const True) . rectIntersect clip) rect) $
       modifyIORef' (ctxFocusables ctx) (wid :)
@@ -483,17 +493,22 @@ wantCursor k = do
 -- | Record where a widget landed this frame. Hit tests read these rects
 -- directly: the cursor layout is deterministic, so a widget's rect is
 -- where it was, except on the frame the layout itself changed.
+{-# INLINE recordRect #-}
 recordRect :: WidgetId -> Rect -> ChibiUI model ()
 recordRect wid r = do
   ctx <- ask
-  liftIO (modifyIORef' (ctxRects ctx) $ IM.insert (slotOf wid) r)
+  liftIO $ do
+    rects <- readIORef (ctxRects ctx)
+    insertRect rects (slotOf wid) r
 
 -- | Where the widget landed last frame, for hit tests that must survive
 -- the frame a layout change happens in.
 prevRect :: WidgetId -> ChibiUI model (Maybe Rect)
 prevRect wid = do
   ctx <- ask
-  liftIO (IM.lookup (slotOf wid) <$> readIORef (ctxPrevRects ctx))
+  liftIO $ do
+    prev <- readIORef (ctxPrevRects ctx)
+    lookupRect prev (slotOf wid)
 
 -- | The theme, for colours and spacing.
 theme :: ChibiUI model Theme
@@ -523,6 +538,7 @@ alignTextToFrame = nextHeight (lineHeight + fieldPad * 2 + 2)
 
 -- | Emit into the draw list. The arena's clip and texture are whatever the
 -- caller left them as; save and restore if that matters.
+{-# INLINE drawIO #-}
 drawIO :: (DrawArena -> IO ()) -> ChibiUI model ()
 drawIO f = do
   ctx <- ask
@@ -538,10 +554,12 @@ withClip r body = do
   pure a
 
 -- | A solid rectangle, in window coordinates.
+{-# INLINE fillRectUI #-}
 fillRectUI :: Rect -> Color -> ChibiUI model ()
 fillRectUI r c = drawIO $ \a -> fillRect a r c
 
 -- | A border of @bw@ logical pixels drawn inside a rectangle.
+{-# INLINE strokeRectUI #-}
 strokeRectUI :: Rect -> Float -> Color -> ChibiUI model ()
 strokeRectUI r bw c = drawIO $ \a -> strokeRect a r bw c
 

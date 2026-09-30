@@ -46,7 +46,9 @@ data LayoutState = LayoutState
   -- ^ A one-shot height for the next widget.
   , lsAvailW :: {-# UNPACK #-} !Float
   -- ^ Width from the indentation to the right edge of this scope.
-  , lsBounds :: !(Maybe Rect)
+  , lsBounded :: !Bool
+  -- ^ Whether 'lsBounds' holds an item placed in this scope.
+  , lsBounds :: {-# UNPACK #-} !Rect
   -- ^ Bounds of all items placed in this scope, excluding trailing gaps.
   }
   deriving (Eq, Show)
@@ -65,7 +67,8 @@ freshLayout =
     , lsNextW = Nothing
     , lsNextH = Nothing
     , lsAvailW = 0
-    , lsBounds = Nothing
+    , lsBounded = False
+    , lsBounds = Rect 0 0 0 0
     }
 
 -- | Commands change the cursor without contributing widget bounds.
@@ -99,7 +102,8 @@ placeLayout gap sz ls = (r, ls
   , lsLast = r
   , lsNextW = Nothing
   , lsNextH = Nothing
-  , lsBounds = Just (maybe r (unionBounds r) (lsBounds ls))
+  , lsBounded = True
+  , lsBounds = if lsBounded ls then unionBounds r (lsBounds ls) else r
   })
   where
     w = max 0 (fromMaybe (sizeW sz) (lsNextW ls))
@@ -127,14 +131,17 @@ beginGroup horizontal ls = ls
   , lsLast = Rect (lsPenX ls) (lsLineY ls) 0 0
   , lsNextW = Nothing
   , lsNextH = Nothing
-  , lsBounds = Nothing
+  , lsBounded = False
+  , lsBounds = Rect 0 0 0 0
   }
 
 -- | Extent from a scope's origin, excluding trailing cursor spacing.
 contentSize :: V2 -> LayoutState -> Size
-contentSize (V2 x y) child = case lsBounds child of
-  Nothing -> Size 0 0
-  Just b -> Size (max 0 (rectX b + rectW b - x)) (max 0 (rectY b + rectH b - y))
+contentSize (V2 x y) child
+  | not (lsBounded child) = Size 0 0
+  | otherwise =
+      let b = lsBounds child
+       in Size (max 0 (rectX b + rectW b - x)) (max 0 (rectY b + rectH b - y))
 
 -- | Lay out scrolling content in its own shifted, vertical coordinate space.
 beginViewport :: Rect -> LayoutState -> LayoutState
@@ -146,7 +153,8 @@ beginViewport r ls = ls
   , lsRowOpen = False
   , lsFlowRow = False
   , lsLineH = 0
-  , lsBounds = Nothing
+  , lsBounded = False
+  , lsBounds = Rect 0 0 0 0
   , lsLast = Rect (rectX r) (rectY r) 0 0
   }
 
