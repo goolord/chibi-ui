@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Reduced per-frame allocation churn roughly 70% on the demo UI (idle
+  frames: about 690 KB to about 200 KB allocated per frame; minor GCs per
+  thousand frames: 222 to 71), with identical geometry, damage decisions,
+  and widget behavior. Rasterized glyphs are now memoized per raster size
+  in the font, so steady-state text measures and draws without FFI calls
+  or per-character heap allocation; the glyph walk steps UTF-8 by byte
+  offsets and emits quads straight into the draw arena, and damage
+  tracking compares the vertex buffer in place instead of copying it every
+  frame (a frame that changed nothing allocates nothing to diff). Peak
+  live memory is unchanged (the glyph cache adds kilobytes). The demo
+  view moved to `examples/DemoCore.hs` behind the unchanged `Demo` entry
+  point, and a `chibi-ui-membench` executable runs that exact view
+  headlessly over scripted input, reporting allocation per frame and GC
+  totals from RTS statistics.
 - Added rudimentary damage tracking. Each frame's draw list is diffed
   against the previous one, quad by quad: a frame that changed nothing
   presents without drawing, and a frame that changed a little repaints only

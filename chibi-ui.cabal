@@ -99,6 +99,7 @@ executable chibi-ui-demo
     import:           extensions
     import:           warnings
     main-is:          Demo.hs
+    other-modules:    DemoCore
     hs-source-dirs:   examples
     build-depends:
         base >=4.20 && <4.23,
@@ -106,6 +107,19 @@ executable chibi-ui-demo
         chibi-ui,
         text ^>=2.1
     ghc-options:      -threaded
+
+executable chibi-ui-membench
+    import:           extensions
+    import:           warnings
+    main-is:          MemBench.hs
+    other-modules:    DemoCore
+    hs-source-dirs:   bench, examples
+    build-depends:
+        base >=4.20 && <4.23,
+        bytestring ^>=0.12,
+        chibi-ui,
+        text ^>=2.1
+    ghc-options:      -threaded -with-rtsopts=-T
 
 test-suite chibi-ui-test
     import:           extensions

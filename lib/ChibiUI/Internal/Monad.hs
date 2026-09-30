@@ -108,7 +108,7 @@ import ChibiUI.Internal.Context
   , writeClipboard
   )
 import ChibiUI.Internal.Draw
-import ChibiUI.Internal.Font (GlyphQuad (..), lineHeight, fontGlyphs, fontMeasure)
+import ChibiUI.Internal.Font (lineHeight, fontDrawText, fontMeasure)
 import ChibiUI.Internal.Id
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (LayoutState)
@@ -531,9 +531,10 @@ drawIO f = do
 -- | Restrict both painting and pointer hit tests to a fixed rectangle.
 withClip :: Rect -> ChibiUI model a -> ChibiUI model a
 withClip r body = do
-  drawIO (`pushClip` r)
+  ctx <- ask
+  liftIO (pushClip (ctxArena ctx) r)
   a <- body
-  drawIO popClip
+  liftIO (popClip (ctxArena ctx))
   pure a
 
 -- | A solid rectangle, in window coordinates.
@@ -567,13 +568,8 @@ drawGlyphs x y t col = do
     let a = ctxArena ctx
     font <- readIORef (ctxFont ctx)
     setTexture a texGlyphAtlas
-    quads <- fontGlyphs font x y t
-    mapM_ (emitQuad a col) quads
+    fontDrawText font a x y col t
     setTexture a texFlat
-
-emitQuad :: DrawArena -> Color -> GlyphQuad -> IO ()
-emitQuad a col (GlyphQuad x0 y0 x1 y1 u0 v0 u1 v1) =
-  emitQuadUV a x0 y0 x1 y1 col u0 v0 u1 v1
 
 -- | Centre one line of text in a rectangle.
 textInRect :: Rect -> Text -> Color -> ChibiUI model ()

@@ -30,7 +30,7 @@ import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (ForeignPtr, mallocForeignPtrBytes, withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
-import Foreign.Storable (pokeByteOff)
+import Foreign.Storable (peekByteOff, pokeByteOff)
 import ChibiUI.Internal.Types
   ( Color (..)
   , Rect (..)

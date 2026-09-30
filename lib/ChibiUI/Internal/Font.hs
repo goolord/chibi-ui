@@ -4,32 +4,43 @@
 -- into one coverage atlas, and text draws as glyph quads from it. One font
 -- and one line height; measurement walks glyph advances, so text is
 -- variable-width.
+--
+-- Rasterized glyphs are memoized per raster size in a strict 'IntMap', so
+-- steady-state frames measure and draw text without FFI crossings or
+-- per-glyph heap allocation; a scale change drops the cache with the old
+-- C font.
 module ChibiUI.Internal.Font
   ( Font
-  , GlyphQuad (..)
   , lineHeight
   , embeddedFont
   , newFont
   , fontFree
   , fontSetScale
   , fontMeasure
-  , fontGlyphs
+  , fontDrawText
   , fontAtlasPixels
   , fontAtlasSize
   , fontTakeDirty
   ) where
 
+import Control.Monad (when)
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Unsafe as BSU
 import Data.FileEmbed (embedFileRelative)
-import Data.IORef
 import Data.Int (Int32)
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntMap.Strict as IM
+import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Unsafe as TU
 import Data.Word (Word8, Word32)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
+import ChibiUI.Internal.Draw (DrawArena, emitQuadUV)
+import ChibiUI.Internal.Types (Color)
 
 -- | The embedded TrueType font, from nano-ui's SDL backend: a subset of
 -- Inter (SIL OFL).
@@ -47,41 +58,35 @@ atlasWidth, atlasHeight :: Int
 atlasWidth = 512
 atlasHeight = 512
 
--- | One rasterized glyph, in device pixels at the current size.
+-- | One rasterized glyph, in device pixels at the current size. All fields
+-- are unboxed into the constructor, so a cache hit allocates nothing.
 data GlyphDev = GlyphDev
-  { gdAX :: !Int
-  , gdAY :: !Int
-  , gdAX2 :: !Int
-  , gdAY2 :: !Int
-  , gdW :: !Float
-  , gdH :: !Float
-  , gdX1 :: !Float
-  , gdY1 :: !Float
-  , gdAdvance :: !Float
-  }
-
--- | One glyph quad: corners @x0, y0, x1, y1@ in logical pixels and UV
--- corners @u0, v0, u1, v1@ into the font atlas.
-data GlyphQuad = GlyphQuad
-  { gqX0 :: !Float
-  , gqY0 :: !Float
-  , gqX1 :: !Float
-  , gqY1 :: !Float
-  , gqU0 :: !Float
-  , gqV0 :: !Float
-  , gqU1 :: !Float
-  , gqV1 :: !Float
+  { gdAX :: {-# UNPACK #-} !Int
+  , gdAY :: {-# UNPACK #-} !Int
+  , gdAX2 :: {-# UNPACK #-} !Int
+  , gdAY2 :: {-# UNPACK #-} !Int
+  , gdW :: {-# UNPACK #-} !Float
+  , gdH :: {-# UNPACK #-} !Float
+  , gdX1 :: {-# UNPACK #-} !Float
+  , gdY1 :: {-# UNPACK #-} !Float
+  , gdAdvance :: {-# UNPACK #-} !Float
   }
 
 -- | The loaded font: the C handle, the font's bytes for scale rebuilds,
--- and the metrics the raster size derives from.
+-- the metrics the raster size derives from, the device-pixel space
+-- advance, and the glyph cache for the current raster size.
 data Font = Font
   { fHandle :: !(IORef (Ptr ()))
-  , fBytes :: !ByteString
+  , fBytes :: !BS.ByteString
   , fScale :: !(IORef Float)
   , fFHeight :: !(IORef Float)
   , fDescent :: !(IORef Float)
-  , fSpaceAdv :: !(IORef Float)
+  , fSpaceAdvDev :: !(IORef Float)
+  -- ^ The space glyph's advance at the current raster size, in device
+  -- pixels.
+  , fGlyphs :: !(IORef (IntMap GlyphDev))
+  -- ^ Rasterized glyphs by code point, valid for the current handle and
+  -- raster size only.
   }
 
 foreign import ccall unsafe "chibi_rfont_init"
@@ -133,6 +138,7 @@ newFont bytes = do
   fh <- newIORef 0
   ds <- newIORef 0
   sa <- newIORef 0
+  glyphs <- newIORef IM.empty
   let f =
         Font
           { fHandle = handle
@@ -140,14 +146,15 @@ newFont bytes = do
           , fScale = scaleRef
           , fFHeight = fh
           , fDescent = ds
-          , fSpaceAdv = sa
+          , fSpaceAdvDev = sa
+          , fGlyphs = glyphs
           }
   fontSetScale f 1
   pure f
 
 -- | (Re)load the C font at a UI scale. The raster size is the line height
 -- in device pixels; RFont caches glyphs per size, so a scale change starts
--- a fresh font and atlas.
+-- a fresh font and atlas, and the Haskell-side glyph cache with them.
 fontSetScale :: Font -> Float -> IO ()
 fontSetScale f scale = do
   let scale' = if scale > 0 && not (isNaN scale || isInfinite scale) then scale else 1
@@ -174,7 +181,11 @@ fontSetScale f scale = do
             sa <- peekByteOff m 8 :: IO Float
             writeIORef (fFHeight f) fh
             writeIORef (fDescent f) ds
-            writeIORef (fSpaceAdv f) sa
+            -- The space advance in device pixels, precomputed: a space
+            -- has no glyph box, so its width comes from the font's hmtx
+            -- entry scaled by the raster size.
+            writeIORef (fSpaceAdvDev f) (if fh > 0 then sa * fromIntegral sizeD / fh else 0)
+          writeIORef (fGlyphs f) IM.empty
           writeIORef (fScale f) scale'
 
 -- | Free the C font. The record is dead afterwards.
@@ -190,106 +201,112 @@ currentSize f = do
   scale <- readScale f
   pure (fromIntegral (max 8 (round (lineHeight * scale) :: Int)))
 
--- | Rasterize (or fetch) one glyph, in device pixels. Tabs read as spaces;
--- a missing glyph comes back blank with no advance.
-glyphDev :: Font -> Char -> IO GlyphDev
-glyphDev f c = do
-  h <- readIORef (fHandle f)
-  if h == nullPtr
-    then pure blank
-    else do
-      sizeD <- currentSize f
-      allocaBytes glyphBytes $ \p -> do
-        c_glyph h (fromIntegral (fromEnum c)) sizeD p
-        peekGlyph p
-  where
-    blank = GlyphDev 0 0 0 0 0 0 0 0 0
-
--- | The space advance at the current raster size, in device pixels. A
--- space has no glyph box, so stb returns a blank glyph for it; the width
--- comes from the font's hmtx entry instead.
+-- | The space advance at the current raster size, in device pixels.
 spaceAdvDev :: Font -> IO Float
-spaceAdvDev f = do
-  sa <- readIORef (fSpaceAdv f)
-  fh <- readIORef (fFHeight f)
-  sizeD <- currentSize f
-  pure (if fh > 0 then sa * fromIntegral sizeD / fh else 0)
+spaceAdvDev f = readIORef (fSpaceAdvDev f)
 
 -- | The width of one line of text, in logical pixels: the sum of glyph
 -- advances. Newlines advance nothing. Measuring rasterizes the glyphs, so
--- repeated frames are cache reads.
+-- repeated frames are cache reads; the loop walks the text by UTF-8 byte
+-- offsets and the glyph cache by pure map lookups, allocating nothing per
+-- character.
 fontMeasure :: Font -> Text -> IO Float
 fontMeasure f t = do
   scale <- readScale f
-  dev <- T.foldl' step (pure 0) (T.map visibleChar t)
-  pure (dev / scale)
-  where
-    visibleChar c = if c == '\t' then ' ' else c
-    step accIO c = do
-      acc <- accIO
-      adv <-
-        if c == ' '
-          then spaceAdvDev f
-          else gdAdvance <$> glyphDev f c
-      pure (acc + adv)
+  glyphs <- readIORef (fGlyphs f)
+  sa <- spaceAdvDev f
+  let end = TU.lengthWord8 t
+      go !ms !acc !i
+        | i >= end = pure acc
+        | otherwise = case TU.iter t i of
+            TU.Iter c d
+              | c == ' ' || c == '\t' -> go ms (acc + sa) (i + d)
+              | c == '\n' || c == '\r' -> go ms acc (i + d)
+              | otherwise -> case IM.findWithDefault missGlyph (fromEnum c) ms of
+                  g
+                    | gdAdvance g >= 0 -> go ms (acc + gdAdvance g) (i + d)
+                    | otherwise -> do
+                        (ms', g') <- rasterizeInto ms f c
+                        go ms' (acc + max 0 (gdAdvance g')) (i + d)
+  dev <- go glyphs 0 0
+  pure (dev * recip scale)
 
--- | The quads of one line of text, with the line box's top-left at the
--- logical pen. Baseline math follows RFont's: the baseline sits
--- @(fheight + descent) / fheight@ of the size below the line top, and each
--- glyph hangs from the baseline by its bearings.
-fontGlyphs :: Font -> Float -> Float -> Text -> IO [GlyphQuad]
-fontGlyphs f penX penY t = do
+-- | The sentinel 'findWithDefault' returns for a glyph not yet
+-- rasterized: a negative advance, which no real glyph has.
+missGlyph :: GlyphDev
+missGlyph = GlyphDev 0 0 0 0 0 0 0 0 (-1)
+
+-- | Rasterize a code point, add it to the font's cache, and return the
+-- glyph with the updated map.
+rasterizeInto :: IntMap GlyphDev -> Font -> Char -> IO (IntMap GlyphDev, GlyphDev)
+rasterizeInto glyphs f c = do
+  h <- readIORef (fHandle f)
+  g <-
+    if h == nullPtr
+      then pure missGlyph
+      else do
+        sizeD <- currentSize f
+        allocaBytes glyphBytes $ \p -> do
+          c_glyph h (fromIntegral (fromEnum c)) sizeD p
+          peekGlyph p
+  g `seq` writeIORef (fGlyphs f) (IM.insert (fromEnum c) g glyphs)
+  pure (IM.insert (fromEnum c) g glyphs, g)
+
+-- | Draw one line of text as glyph quads into the draw arena, with the
+-- line box's top-left at the logical pen. Baseline math follows RFont's:
+-- the baseline sits @(fheight + descent) / fheight@ of the size below the
+-- line top, and each glyph hangs from the baseline by its bearings. Tabs
+-- read as spaces; newlines advance nothing. The walk and the cached-glyph
+-- lookups are unboxed, so a steady-state draw allocates nothing per
+-- character.
+fontDrawText :: Font -> DrawArena -> Float -> Float -> Color -> Text -> IO ()
+fontDrawText f arena penX penY col t = do
   scale <- readScale f
   h <- readIORef (fHandle f)
-  if h == nullPtr
-    then pure []
-    else do
-      sizeD <- currentSize f
-      fh <- readIORef (fFHeight f)
-      ds <- readIORef (fDescent f)
-      let baseline =
-            if fh > 0
-              then fromIntegral sizeD * (fh + ds) / fh
-              else fromIntegral sizeD
-          penXd = penX * scale
-          baseY = penY * scale + baseline
-          toLogical q =
-            q
-              { gqX0 = gqX0 q / scale
-              , gqY0 = gqY0 q / scale
-              , gqX1 = gqX1 q / scale
-              , gqY1 = gqY1 q / scale
-              }
-          go _ rest | T.null rest = pure []
-          go !penAcc rest = case T.uncons rest of
-            Nothing -> pure []
-            Just (c, cs)
-              | c == '\n' || c == '\r' -> go penAcc cs
-              | c == ' ' -> do
-                  -- A space draws nothing and advances by the font's own
-                  -- space width.
-                  sa <- spaceAdvDev f
-                  go (penAcc + sa) cs
-              | otherwise -> do
-                  g <- glyphDev f c
-                  let quad
-                        | gdW g > 0 && gdH g > 0 =
-                            [ GlyphQuad
-                              { gqX0 = penAcc + gdX1 g
-                              , gqY0 = baseY + gdY1 g
-                              , gqX1 = penAcc + gdX1 g + gdW g
-                              , gqY1 = baseY + gdY1 g + gdH g
-                              , gqU0 = fromIntegral (gdAX g) / fromIntegral atlasWidth
-                              , gqV0 = fromIntegral (gdAY g) / fromIntegral atlasHeight
-                              , gqU1 = fromIntegral (gdAX2 g) / fromIntegral atlasWidth
-                              , gqV1 = fromIntegral (gdAY2 g) / fromIntegral atlasHeight
-                              }
-                            ]
-                        | otherwise = []
-                  rest' <- go (penAcc + gdAdvance g) cs
-                  pure (quad ++ rest')
-      quads <- go penXd (T.map (\c -> if c == '\t' then ' ' else c) t)
-      pure (map toLogical quads)
+  when (h /= nullPtr) $ do
+    sizeD <- currentSize f
+    fh <- readIORef (fFHeight f)
+    ds <- readIORef (fDescent f)
+    sa <- spaceAdvDev f
+    glyphs <- readIORef (fGlyphs f)
+    let baseline =
+          if fh > 0
+            then fromIntegral sizeD * (fh + ds) / fh
+            else fromIntegral sizeD
+        baseY = penY * scale + baseline
+        invScale = recip scale
+        atlasW = fromIntegral atlasWidth :: Float
+        atlasH = fromIntegral atlasHeight :: Float
+        end = TU.lengthWord8 t
+        go !ms !pen !i
+          | i >= end = pure ()
+          | otherwise = case TU.iter t i of
+              TU.Iter c d
+                | c == '\n' || c == '\r' -> go ms pen (i + d)
+                | c == ' ' || c == '\t' -> go ms (pen + sa) (i + d)
+                | otherwise -> case IM.findWithDefault missGlyph (fromEnum c) ms of
+                    g ->
+                      if gdAdvance g < 0
+                        then do
+                          (ms', g') <- rasterizeInto ms f c
+                          if gdAdvance g' < 0
+                            then go ms' pen (i + d) -- no font; skip it
+                            else go ms' pen i -- retry as a hit, emitting it
+                        else do
+                          when (gdW g > 0 && gdH g > 0) $
+                            emitQuadUV
+                              arena
+                              ((pen + gdX1 g) * invScale)
+                              ((baseY + gdY1 g) * invScale)
+                              ((pen + gdX1 g + gdW g) * invScale)
+                              ((baseY + gdY1 g + gdH g) * invScale)
+                              col
+                              (fromIntegral (gdAX g) / atlasW)
+                              (fromIntegral (gdAY g) / atlasH)
+                              (fromIntegral (gdAX2 g) / atlasW)
+                              (fromIntegral (gdAY2 g) / atlasH)
+                          go ms (pen + gdAdvance g) (i + d)
+    go glyphs (penX * scale) 0
 
 readScale :: Font -> IO Float
 readScale f = do

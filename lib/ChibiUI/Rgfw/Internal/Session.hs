@@ -198,11 +198,16 @@ runChibiAppWith opts initial view = inBoundThread $
             damage0 <- trackFrame snapRef (inputWindowSize inp0) dd
             -- New texture contents repaint the same quads differently.
             let damage = if imagesChanged then DamageFull else damage0
+            let glyphCmds =
+                  foldl'
+                    (\n c -> if cmdTextureId c == texGlyphAtlas then n + 1 else n)
+                    (0 :: Int)
+                    (drawCommands dd)
             writeIORef
               statsRef
               ( drawVertexCount dd
               , length (drawCommands dd)
-              , length [() | c <- drawCommands dd, cmdTextureId c == texGlyphAtlas]
+              , glyphCmds
               )
             renderFrameGl renderer font scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage
             R.swapBuffersGL win

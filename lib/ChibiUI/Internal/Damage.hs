@@ -22,6 +22,7 @@ import Data.IORef (IORef, readIORef, writeIORef)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Unsafe as BSU
 import Data.Word (Word8)
+import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
@@ -34,6 +35,9 @@ import ChibiUI.Internal.Types
   , rectNonEmpty
   , rectUnion
   )
+
+foreign import ccall unsafe "string.h memcmp"
+  c_memcmp :: Ptr Word8 -> Ptr Word8 -> CSize -> IO CInt
 
 -- | What a frame owes the screen.
 data Damage
@@ -82,9 +86,7 @@ damageFullFrac = 0.7
 -- | Copy a frame's geometry into an owned snapshot.
 takeSnapshot :: DrawData -> IO FrameSnapshot
 takeSnapshot dd = do
-  verts <-
-    withForeignPtr (drawVertices dd) $ \p ->
-      BS.packCStringLen (castPtr p, drawVertexCount dd * vertexSize)
+  verts <- copyVertices dd
   pure
     FrameSnapshot
       { snapVertices = verts
@@ -94,15 +96,14 @@ takeSnapshot dd = do
 
 -- | Diff a snapshot against the frame just drawn. Texture contents are
 -- assumed unchanged; the backend forces a full frame when the atlas or an
--- image uploads.
+-- image uploads. Equal geometry is detected by comparing the arena in
+-- place, so an unchanged frame copies nothing.
 frameDamage :: FrameSnapshot -> DrawData -> Size -> IO Damage
 frameDamage snap dd window = do
   let newQuads = drawIndexCount dd `div` 6
       newBatches = [(cmdRect c, cmdTextureId c) | c <- drawCommands dd]
-  newVerts <-
-    withForeignPtr (drawVertices dd) $ \p ->
-      BS.packCStringLen (castPtr p, drawVertexCount dd * vertexSize)
-  if newQuads == snapQuadCount snap && newBatches == snapBatches snap && newVerts == snapVertices snap
+  same <- vertexBytesEq (snapVertices snap) dd
+  if newQuads == snapQuadCount snap && newBatches == snapBatches snap && same
     then pure DamageNone
     else
       if length newBatches == length (snapBatches snap)
@@ -111,8 +112,27 @@ frameDamage snap dd window = do
         else do
           let oldN = snapQuadCount snap
               n = min oldN newQuads
+          newVerts <- copyVertices dd
           rects <- changedQuadRects (snapVertices snap) newVerts n oldN newQuads
           pure (maybe DamageFull (mergeDamage window) rects)
+
+-- | Whether the frame's used vertex prefix equals the snapshot's bytes,
+-- compared in place: the arena's buffer against the snapshot's copy.
+vertexBytesEq :: BS.ByteString -> DrawData -> IO Bool
+vertexBytesEq snap dd = do
+  let len = drawVertexCount dd * vertexSize
+  if len /= BS.length snap
+    then pure False
+    else
+      withForeignPtr (drawVertices dd) $ \vp ->
+        BSU.unsafeUseAsCStringLen snap $ \(sp, _) ->
+          (== 0) <$> c_memcmp vp (castPtr sp) (fromIntegral len)
+
+-- | Copy the frame's used vertex prefix into an owned bytestring.
+copyVertices :: DrawData -> IO BS.ByteString
+copyVertices dd =
+  withForeignPtr (drawVertices dd) $ \p ->
+    BS.packCStringLen (castPtr p, drawVertexCount dd * vertexSize)
 
 -- | Diff and update the snapshot a backend keeps of the frame on screen.
 -- A damage-free frame leaves the stored snapshot in place: it still
