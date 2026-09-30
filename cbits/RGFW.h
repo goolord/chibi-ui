@@ -11206,6 +11206,16 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 win->src.actionFrame = RGFW_FALSE;
             }
 
+            /* nano-ui: another window took the capture while a button was
+               held; its release will never arrive, so report it now. */
+            {
+                u8 button;
+                for (button = 0; button < RGFW_mouseFinal; button++) {
+                    if (_RGFW->mouseButtons[button].current)
+                        RGFW_mouseButtonCallback(win, (RGFW_mouseButton)button, RGFW_FALSE);
+                }
+            }
+
             break;
         }
 		#ifndef RGFW_NO_DPI
@@ -11449,6 +11459,11 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			else value = (message == WM_LBUTTONDOWN) ? (u8)RGFW_mouseLeft :
 									 (message == WM_RBUTTONDOWN) ? (u8)RGFW_mouseRight : (u8)RGFW_mouseMiddle;
 
+			/* nano-ui: capture the pointer so a drag keeps receiving motion
+			   and the release even outside the window. Without it the
+			   button-up off-window is lost and the app believes the button
+			   is still held. */
+			SetCapture(hWnd);
 			RGFW_mouseButtonCallback(win, value, 1);
 			break;
 		}
@@ -11459,7 +11474,10 @@ LRESULT CALLBACK WndProcW(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			else value = (message == WM_LBUTTONUP) ? (u8)RGFW_mouseLeft :
 									 (message == WM_RBUTTONUP) ? (u8)RGFW_mouseRight : (u8)RGFW_mouseMiddle;
 
+			/* nano-ui: report the release before ReleaseCapture, which sends
+			   WM_CAPTURECHANGED and would release held buttons itself. */
 			RGFW_mouseButtonCallback(win, value, 0);
+			ReleaseCapture();
 			break;
 		}
 		case WM_MOUSEWHEEL: {
@@ -12741,7 +12759,16 @@ RGFW_bool RGFW_readClipboardPtr(RGFW_dataTransferType requestedType, u8* buffer,
 
 RGFW_bool RGFW_writeClipboard(const RGFW_dataTransfer* data) {
 	RGFW_ASSERT(data != NULL);
-	HANDLE object = GlobalAlloc(GMEM_MOVEABLE, data->length * sizeof(WCHAR));
+
+	/* nano-ui: measure first. Converting with -1 needs room for the null
+	   terminator too, so a buffer of exactly `length` WCHARs failed with
+	   ERROR_INSUFFICIENT_BUFFER and left an unterminated string on the
+	   clipboard that dropped the last character. */
+	i32 wlen = MultiByteToWideChar(CP_UTF8, 0, data->data, (i32)data->length, NULL, 0);
+	if (wlen < 0)
+		return RGFW_FALSE;
+
+	HANDLE object = GlobalAlloc(GMEM_MOVEABLE, (size_t)(wlen + 1) * sizeof(WCHAR));
 	if (!object)
 		return RGFW_FALSE;
 
@@ -12751,7 +12778,8 @@ RGFW_bool RGFW_writeClipboard(const RGFW_dataTransfer* data) {
 		return RGFW_FALSE;
 	}
 
-	MultiByteToWideChar(CP_UTF8, 0, data->data, -1, buffer, (i32)data->length);
+	MultiByteToWideChar(CP_UTF8, 0, data->data, (i32)data->length, buffer, wlen + 1);
+	buffer[wlen] = L'\0';
 	GlobalUnlock(object);
 
 	size_t retry = 0;
