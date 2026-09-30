@@ -126,8 +126,8 @@ treeNode title body = column $ do
     when focused (strokeRectUI r 1 (themeAccent th))
     let x = rectX r + gutter / 2
         y = rectY r + rectH r / 2
-    fillRectUI (Rect (x - 4) y 8 1) (themeTextDim th)
-    when (not open) (fillRectUI (Rect x (y - 4) 1 8) (themeTextDim th))
+    fillRectUI (Rect (x - 4.5) (y - 0.5) 9 1) (themeTextDim th)
+    when (not open) (fillRectUI (Rect (x - 0.5) (y - 4.5) 1 9) (themeTextDim th))
     drawTextIn (r {rectX = rectX r + gutter, rectW = max 0 (rectW r - gutter)}) title (themeText th)
   when open (indent gutter body)
 
