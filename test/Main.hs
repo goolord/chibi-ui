@@ -30,6 +30,7 @@ main = do
   testTextAreaViewport
   testIntInput
   testSlider
+  testCheckbox
   testTable
   testRaggedTable
   testPlotLines
@@ -451,6 +452,23 @@ testSlider = do
   blurred <- frame ctx (at 500 400 . pressLeft) view
   outside <- frame ctx (keys [KeyRight] . releaseLeft) view
   assert "slider: arrows reached an unfocused slider" (blurred == right && outside == right)
+
+-- A click flips a checkbox, and so does Space while it is focused.
+testCheckbox :: IO ()
+testCheckbox = do
+  ctx <- newTestContext
+  ref <- newIORef False
+  let view = do
+        v <- checkbox "on" =<< liftIO (readIORef ref)
+        liftIO (writeIORef ref v)
+        pure v
+  _ <- frame ctx id view
+  r <- bigRect =<< readRects ctx
+  pressed <- frame ctx (at (rectX r + 2) (rectY r + 2) . pressLeft) view
+  clicked <- frame ctx (at (rectX r + 2) (rectY r + 2) . releaseLeft) view
+  spaced <- frame ctx (keys [KeySpace]) view
+  idle <- frame ctx id view
+  assert "checkbox: click or Space did not flip it" (not pressed && clicked && not spaced && not idle)
 
 -- A wave draws more than a flat line, which draws more than nothing; every
 -- series stays inside the plot's rect.

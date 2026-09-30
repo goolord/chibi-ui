@@ -20,11 +20,12 @@ data Model = Model
   , temperature :: !Float
   , volume :: !Float
   , notes :: !Text
+  , showPlot :: !Bool
   }
 
 -- | The model the demo starts with.
 demoModel :: Model
-demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line."
+demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True
 
 demo :: ChibiUI Model ()
 demo = do
@@ -77,10 +78,13 @@ demo = do
     started <- gets volume
     v <- slider started 0 1
     modify (\m -> m {volume = v})
+  shown <- checkbox "show plot" =<< gets showPlot
+  modify (\m -> m {showPlot = shown})
   vol <- gets volume
-  nextWidth 220
-  nextHeight 80
-  plotLines [sin (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
+  when shown $ do
+    nextWidth 220
+    nextHeight 80
+    plotLines [sin (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
 
   newline
   let greeting = (\value -> "hello, " <> value <> "!") <$> gets name

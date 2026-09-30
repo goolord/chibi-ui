@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `checkbox caption value`: a box that a click, or Enter/Space
+  while focused, flips.
+
 - `scrollColumn`'s scrollbar takes the mouse: drag the thumb to scroll,
   or press the track to jump the thumb under the pointer and keep
   dragging. The drag holds the pointer until release, even off the bar,

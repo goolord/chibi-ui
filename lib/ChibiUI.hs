@@ -61,6 +61,7 @@ module ChibiUI
   , labelDim
   , selectableText
   , button
+  , checkbox
   , textInput
   , textArea
   , intInput
@@ -173,6 +174,7 @@ import ChibiUI.Internal.Style (Theme (..), TextAlign (..), defaultTheme, lightTh
 import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))
 import ChibiUI.Internal.Widgets
   ( button
+  , checkbox
   , floatInput
   , image
   , intInput
