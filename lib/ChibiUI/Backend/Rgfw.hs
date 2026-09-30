@@ -10,16 +10,10 @@ module ChibiUI.Backend.Rgfw
   , defaultWindowSettings
   ) where
 
-import ChibiUI.Internal.Monad (ChibiUI)
 import ChibiUI.Rgfw.Internal.Session
   ( RgfwOptions (..)
   , WindowSettings (..)
   , defaultRgfwOptions
   , defaultWindowSettings
-  , runChibiAppWith
+  , runChibiApp
   )
-
--- | Run a view with an initial application model and @opts@' window,
--- theme, and scale. Model updates persist across frames.
-runChibiApp :: RgfwOptions -> model -> ChibiUI model () -> IO ()
-runChibiApp = runChibiAppWith

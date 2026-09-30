@@ -172,8 +172,7 @@ import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Style (Theme (..), TextAlign (..), defaultTheme, lightTheme)
 import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))
 import ChibiUI.Internal.Widgets
-  ( availWidth
-  , button
+  ( button
   , floatInput
   , image
   , intInput
@@ -188,5 +187,4 @@ import ChibiUI.Internal.Widgets
   , treeNode
   , textInput
   , textArea
-  , useImageRgba
   )

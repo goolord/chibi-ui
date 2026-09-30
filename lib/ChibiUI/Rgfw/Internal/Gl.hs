@@ -20,7 +20,6 @@ module ChibiUI.Rgfw.Internal.Gl
   ) where
 
 import Control.Monad (forM, forM_, unless, when)
-import Data.Bits (shiftR, (.&.))
 import Data.IORef
 import Data.Int (Int32)
 import qualified Data.ByteString as BS
@@ -74,8 +73,8 @@ foreign import ccall unsafe "chibi_ui_gl_clear_region"
 -- current.
 data GlRenderer = GlRenderer
   { glHandle :: !(Ptr ChibiUiGl)
-  , glAtlas :: !(IORef (Int, Int))
-  -- ^ The atlas size last uploaded, to detect resizes.
+  , glAtlasUploaded :: !(IORef Bool)
+  -- ^ Whether the atlas texture exists yet.
   , glImages :: !(IORef (IM.IntMap Int))
   -- ^ Per image id, the version last uploaded.
   , glFrameSize :: !(IORef (Int, Int))
@@ -90,7 +89,7 @@ newGlRenderer = do
   h <- c_create
   when (h == nullPtr) $
     fail "chibi-ui: OpenGL renderer setup failed (needs an OpenGL 3.2 core context)"
-  GlRenderer h <$> newIORef (0, 0) <*> newIORef IM.empty <*> newIORef (0, 0)
+  GlRenderer h <$> newIORef False <*> newIORef IM.empty <*> newIORef (0, 0)
 
 -- | Release the GPU objects (the context must still be current).
 freeGlRenderer :: GlRenderer -> IO ()
@@ -166,21 +165,21 @@ drawDamaged h !scale !fbW !fbH drawData rects bgR bgG bgB = do
 readRetainedPixels :: GlRenderer -> Int -> Int -> IO BS.ByteString
 readRetainedPixels r w h = BSI.create (w * h * 4) (c_readRetained (glHandle r))
 
--- | Upload the font's coverage atlas when glyphs were added since the last
--- sync, or when its size changed. Reports whether the texture changed, so
--- callers can repaint in full: baked glyph positions may have moved.
+-- | Upload the font's coverage atlas the first time, and again whenever
+-- glyphs were added since the last sync. Reports whether the texture
+-- changed, so callers can repaint in full: baked glyph positions may have
+-- moved.
 syncFontAtlasGl :: GlRenderer -> Font -> IO Bool
 syncFontAtlasGl r font = do
   dirty <- fontTakeDirty font
-  lastWH <- readIORef (glAtlas r)
-  atlasWH <- fontAtlasSize font
-  if not (dirty || lastWH /= atlasWH)
+  uploaded <- readIORef (glAtlasUploaded r)
+  if uploaded && not dirty
     then pure False
     else do
-      let (w, h) = atlasWH
+      let (w, h) = atlasSize
       pixels <- fontAtlasPixels font
       ok <- (/= 0) <$> c_uploadAtlas (glHandle r) pixels (fromIntegral w) (fromIntegral h)
-      when ok (writeIORef (glAtlas r) atlasWH)
+      when ok (writeIORef (glAtlasUploaded r) True)
       pure ok
 
 -- | Upload registered images whose version changed since the last sync.
@@ -224,8 +223,3 @@ physClip !scale !w !h (Rect x y rw rh) =
       !cx1 = min w x1
       !cy1 = min h y1
    in if cx0 >= cx1 || cy0 >= cy1 then Nothing else Just (cx0, cy0, cx1, cy1)
-
-colorFloats :: Color -> (Float, Float, Float, Float)
-colorFloats (Color w) = (chan 24, chan 16, chan 8, chan 0)
-  where
-    chan s = fromIntegral ((w `shiftR` s) .&. 0xFF) / 255

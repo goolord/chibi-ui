@@ -11,6 +11,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import ChibiUI.Internal.Input
+import ChibiUI.Internal.Types (clamp)
 
 data EditState = EditState {editText :: !Text, editCaret :: !Int, editAnchor :: !Int}
   deriving (Eq, Show)
@@ -48,7 +49,7 @@ select :: Int -> Int -> Editor -> Editor
 select a c ed = ed {editState = s {editCaret = limit c, editAnchor = limit a}}
   where
     s = editState ed
-    limit = max 0 . min (T.length (editText s))
+    limit = clamp 0 (T.length (editText s))
 
 selectWord :: Int -> Editor -> Editor
 selectWord index ed
@@ -57,7 +58,7 @@ selectWord index ed
       (i + T.length (T.takeWhile same (T.drop i t))) ed
   where
     t = editText (editState ed)
-    i = max 0 (min (T.length t - 1) index)
+    i = clamp 0 (T.length t - 1) index
     same c = wordCategory c == wordCategory (T.index t i)
 
 -- Selection and word motion agree on whitespace, identifiers and punctuation.
@@ -144,7 +145,7 @@ target motion (EditState t c _) = case motion of
     ls = textLines t
     (row, (start, line)) = caretRowLine ls c
     vertical delta =
-      let (offset, destination) = ls !! max 0 (min (length ls - 1) (row + delta))
+      let (offset, destination) = ls !! clamp 0 (length ls - 1) (row + delta)
        in offset + min (c - start) (T.length destination)
     wordLength xs =
       let (spaces, rest) = span isSpace xs

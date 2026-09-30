@@ -8,6 +8,7 @@ module ChibiUI.Internal.Context
   , Popup (..)
   , newContext
   , noWidget
+  , noWake
   , setTheme
   , setScale
   , withClipboard
@@ -25,14 +26,14 @@ import qualified Data.ByteString as BS
 import Data.Text (Text)
 import Data.Word (Word64)
 import ChibiUI.Internal.Draw (DrawArena, newDrawArena)
-import ChibiUI.Internal.Font (Font, embeddedFont, fontSetScale, newFont)
+import ChibiUI.Internal.Font (Font, embeddedFont, fontScale, fontSetScale, newFont)
 import ChibiUI.Internal.Id (WidgetId (..), initialIdPath)
 import ChibiUI.Internal.Input (Input, UiCursorKind (..), emptyInput)
 import ChibiUI.Internal.Layout (LayoutState, freshLayout)
 import ChibiUI.Internal.RectTable (RectTable, newRectTable, rectTableToList)
 import ChibiUI.Internal.Store (WidgetStore, emptyWidgetStore)
 import ChibiUI.Internal.Style (Theme, defaultTheme)
-import ChibiUI.Internal.Types (Rect, V2, validScale)
+import ChibiUI.Internal.Types (Rect, V2)
 
 -- | One lightweight overlay. Actions run before the next view invocation.
 data Popup = Popup
@@ -59,8 +60,8 @@ data Context model = Context
   -- ^ Application-owned state, shared by views and deferred menu actions.
   , ctxFont :: !(IORef Font)
   -- ^ The rasterized font; a scale change rebuilds it, and its atlas is
-  -- synced by the backend after frames that added glyphs.
-  , ctxScale :: !(IORef Float)
+  -- synced by the backend after frames that added glyphs. Its scale is
+  -- the UI scale.
   , ctxScaleOverride :: !(IORef Float)
   -- ^ Zero follows the monitor; positive values override device scale.
   , ctxPopup :: !(IORef (Maybe Popup))
@@ -92,7 +93,7 @@ data Context model = Context
   , ctxFrameRequest :: !(IORef Bool)
   -- ^ A view asked for another frame; otherwise the loop blocks on input.
   , ctxWakeAt :: !(IORef Double)
-  -- ^ The earliest 'ctxTime' a view asked for a frame at; infinity for none.
+  -- ^ The earliest 'ctxTime' a view asked for a frame at; 'noWake' for none.
   , ctxArena :: !DrawArena
   , ctxLayout :: !(IORef LayoutState)
   , ctxIdPath :: !(IORef Word64)
@@ -118,6 +119,10 @@ data ModelAccess model = ModelAccess
 noWidget :: WidgetId
 noWidget = WidgetId 0
 
+-- | The wake time that asks for no frame.
+noWake :: Double
+noWake = 1 / 0
+
 -- | A brand-new context: the embedded font at scale 1, the dark theme, and
 -- a clipboard that holds nothing, seeded with the application's model.
 newContext :: model -> IO (Context model)
@@ -128,7 +133,6 @@ newContext initial = do
           let (result, next) = f current in (next, result)
   font0 <- newFont embeddedFont
   font <- newIORef font0
-  scale <- newIORef 1.0
   scaleOverride <- newIORef 0
   popup <- newIORef Nothing
   blocked <- newIORef False
@@ -145,7 +149,7 @@ newContext initial = do
   time <- newIORef 0
   quit <- newIORef False
   frameReq <- newIORef False
-  wakeAt <- newIORef (1 / 0)
+  wakeAt <- newIORef noWake
   arena <- newDrawArena
   layout <- newIORef freshLayout
   idPath <- newIORef initialIdPath
@@ -157,7 +161,6 @@ newContext initial = do
     Context
       { ctxModel = model
        , ctxFont = font
-       , ctxScale = scale
        , ctxScaleOverride = scaleOverride
        , ctxPopup = popup
        , ctxInputBlocked = blocked
@@ -193,17 +196,14 @@ setTheme ctx = writeIORef (ctxTheme ctx)
 -- rebuilds at the new raster size; its atlas is re-uploaded by the backend
 -- on the next sync.
 setScale :: Context model -> Float -> IO ()
-setScale ctx scale = do
-  let valid = if validScale scale then scale else 1
-  writeIORef (ctxScale ctx) valid
-  font <- readIORef (ctxFont ctx)
-  fontSetScale font valid
+setScale ctx scale = readIORef (ctxFont ctx) >>= (`fontSetScale` scale)
 
--- | Replace the font (for hosts that load a TTF of their own).
+-- | Replace the font (for hosts that load a TTF of their own), at the
+-- scale the current one has.
 setFont :: Context model -> Font -> IO ()
 setFont ctx font = do
+  scale <- readIORef (ctxFont ctx) >>= fontScale
   writeIORef (ctxFont ctx) font
-  scale <- readIORef (ctxScale ctx)
   fontSetScale font scale
 
 -- | Install the platform clipboard.

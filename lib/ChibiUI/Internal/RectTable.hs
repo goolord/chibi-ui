@@ -27,7 +27,6 @@ import GHC.Exts
   , Int (..)
   , MutableByteArray#
   , RealWorld
-  , andI#
   , isTrue#
   , newByteArray#
   , readFloatArray#
@@ -37,7 +36,6 @@ import GHC.Exts
   , writeIntArray#
   , (==#)
   , (+#)
-  , (-#)
   , (*#)
   )
 import GHC.IO (IO (IO))
@@ -117,37 +115,30 @@ growTable rt = do
 -- earlier in the same frame.
 {-# INLINE insertRect #-}
 insertRect :: RectTable -> Int -> Rect -> IO ()
-insertRect rt k (Rect (F# x) (F# y) (F# w) (F# h)) = do
+insertRect rt k r = do
   count <- readURef (rtCount rt)
   cap <- readIORef (rtCap rt)
   when ((count + 1) * 4 > cap * 3) (growTable rt)
-  MBox keys <- readIORef (rtKeys rt)
-  MBox rects <- readIORef (rtRects rt)
-  cap' <- readIORef (rtCap rt)
-  let !(I# cap#) = cap'
-      max# = cap# -# 1#
-      !(I# k#) = k
-      start# = andI# k# max#
-      writeFloats b# s0 =
-        case writeFloatArray# rects b# x s0 of
-          s1 -> case writeFloatArray# rects (b# +# 1#) y s1 of
-            s2 -> case writeFloatArray# rects (b# +# 2#) w s2 of
-              s3 -> writeFloatArray# rects (b# +# 3#) h s3
-      go !i# s = case readIntArray# keys i# s of
-        (# s', key# #)
-          | isTrue# (key# ==# 0#) -> case writeFloats (i# *# 4#) s' of
-              s2 -> case writeIntArray# keys i# k# s2 of
-                s3 -> (# s3, True #)
-          | isTrue# (key# ==# k#) -> case writeFloats (i# *# 4#) s' of
-              s2 -> (# s2, False #)
-          | otherwise -> go (if isTrue# (i# ==# max#) then 0# else i# +# 1#) s'
-  fresh <- IO (go start#)
-  when fresh (writeURef (rtCount rt) (count + 1))
+  i <- slotFor rt k
+  fresh <- (== 0) <$> readKeyAt rt i
+  writeRectAt rt i r
+  when fresh $ do
+    writeKeyAt rt i k
+    writeURef (rtCount rt) (count + 1)
 
 -- | The index of a slot's entry, or -1 when the slot was not recorded.
 {-# INLINE probe #-}
 probe :: RectTable -> Int -> IO Int
 probe rt k = do
+  i <- slotFor rt k
+  key <- readKeyAt rt i
+  pure (if key == 0 then -1 else i)
+
+-- | Linear probing from the slot's home: the index holding the slot, or
+-- the empty index where it would go. The load bound keeps an empty one.
+{-# INLINE slotFor #-}
+slotFor :: RectTable -> Int -> IO Int
+slotFor rt k = do
   MBox keys <- readIORef (rtKeys rt)
   cap <- readIORef (rtCap rt)
   let !(I# k#) = k
@@ -155,10 +146,35 @@ probe rt k = do
       !(I# start#) = k .&. (cap - 1)
       go i# s = case readIntArray# keys i# s of
         (# s', key# #)
-          | isTrue# (key# ==# 0#) -> (# s', -1 #)
-          | isTrue# (key# ==# k#) -> (# s', I# i# #)
+          | isTrue# (key# ==# 0#) || isTrue# (key# ==# k#) -> (# s', I# i# #)
           | otherwise -> go (if isTrue# (i# ==# max#) then 0# else i# +# 1#) s'
   IO (go start#)
+
+-- | The key stored at an entry index; zero for an empty entry.
+{-# INLINE readKeyAt #-}
+readKeyAt :: RectTable -> Int -> IO Int
+readKeyAt rt (I# i#) = do
+  MBox keys <- readIORef (rtKeys rt)
+  IO $ \s -> case readIntArray# keys i# s of
+    (# s', key# #) -> (# s', I# key# #)
+
+{-# INLINE writeKeyAt #-}
+writeKeyAt :: RectTable -> Int -> Int -> IO ()
+writeKeyAt rt (I# i#) (I# k#) = do
+  MBox keys <- readIORef (rtKeys rt)
+  IO $ \s -> case writeIntArray# keys i# k# s of
+    s' -> (# s', () #)
+
+{-# INLINE writeRectAt #-}
+writeRectAt :: RectTable -> Int -> Rect -> IO ()
+writeRectAt rt (I# i#) (Rect (F# x) (F# y) (F# w) (F# h)) = do
+  MBox rects <- readIORef (rtRects rt)
+  let base# = i# *# 4#
+  IO $ \s -> case writeFloatArray# rects base# x s of
+    s1 -> case writeFloatArray# rects (base# +# 1#) y s1 of
+      s2 -> case writeFloatArray# rects (base# +# 2#) w s2 of
+        s3 -> case writeFloatArray# rects (base# +# 3#) h s3 of
+          s4 -> (# s4, () #)
 
 -- | The rect stored at an entry index.
 {-# INLINE readRectAt #-}
@@ -185,17 +201,12 @@ memberRect rt k = (>= 0) <$> probe rt k
 -- | Every recorded slot and rect, in slot order, for hosts and tests.
 rectTableToList :: RectTable -> IO [(Int, Rect)]
 rectTableToList rt = do
-  MBox keys <- readIORef (rtKeys rt)
   cap <- readIORef (rtCap rt)
-  let
-      collect :: Int -> [(Int, Rect)] -> IO [(Int, Rect)]
+  let collect :: Int -> [(Int, Rect)] -> IO [(Int, Rect)]
       collect i acc
         | i < 0 = pure acc
         | otherwise = do
-            let !(I# i#) = i
-            key <-
-              IO $ \s -> case readIntArray# keys i# s of
-                (# s', key# #) -> (# s', I# key# #)
+            key <- readKeyAt rt i
             if key == 0
               then collect (i - 1) acc
               else do

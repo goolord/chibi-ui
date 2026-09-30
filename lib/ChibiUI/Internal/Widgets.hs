@@ -12,21 +12,19 @@ module ChibiUI.Internal.Widgets
   , floatInput
   , slider
   , image
-  , useImageRgba
   , plotLines
   , table
   , scrollColumn
   , separator
-  , availWidth
   ) where
 
 import Control.Monad (foldM, forM, forM_, when, void)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Dynamic (toDyn)
-import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
+import ChibiUI.Internal.Draw (emitQuadUV, texImage)
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
@@ -145,20 +143,13 @@ textInput value = textField SingleLine (fieldSize 180) value (const id)
 -- Tab moves focus and Escape restores the focus-time value. Lines do not wrap;
 -- the viewport scrolls to the caret, or with the wheel while hovered.
 textArea :: Text -> ChibiUI model Text
-textArea value = textField MultiLine measured (sanitizeText True value) (const id)
-  where
-    measured = do
-      width <- availWidth
-      pure (Size (min width 320) (fieldHeight + lineHeight * 4))
+textArea value = textField MultiLine (cappedSize 320 (fieldHeight + lineHeight * 4)) (sanitizeText True value) (const id)
 
 -- | A read-only, selectable/copyable line without field chrome.
 selectableText :: Text -> ChibiUI model ()
 selectableText value = void (textField ReadOnly measured value (const id))
   where
-    measured = do
-      Size w h <- textSize value
-      avail <- availWidth
-      pure (Size (min w avail) h)
+    measured = textSize value >>= \(Size w h) -> cappedSize w h
 
 -- | An integer field. While focused, Up and Down step by 1, or by 10 with
 -- Shift. A commit that does not parse reverts to the value passed in.
@@ -181,18 +172,18 @@ parseNumber :: Read a => a -> Text -> a
 parseNumber fallback = fromMaybe fallback . readMaybe . T.unpack . T.strip
 
 fieldSize :: Float -> ChibiUI model Size
-fieldSize width = do
-  avail <- availWidth
-  pure (Size (min avail width) fieldHeight)
+fieldSize width = cappedSize width fieldHeight
+
+-- | @w@ by @h@, narrowed to the width left on the line.
+cappedSize :: Float -> Float -> ChibiUI model Size
+cappedSize w h = (\avail -> Size (min avail w) h) <$> availWidth
 
 -- | A horizontal slider for @value@ between @lo@ and @hi@: drag the thumb
 -- or click the track to set it, and Left/Right step a focused slider by a
 -- tenth of the range. Returns the value it now holds.
 slider :: Float -> Float -> Float -> ChibiUI model Float
 slider value lo hi = do
-  (wid, r) <- widgetRect $ do
-    avail <- availWidth
-    pure (Size (min avail 160) fieldHeight)
+  (wid, r) <- widgetRect (fieldSize 160)
   th <- theme
   i <- interaction wid r
   inp <- getInput
@@ -219,6 +210,19 @@ slider value lo hi = do
   pure moved
 
 data FieldMode = SingleLine | MultiLine | ReadOnly deriving (Eq)
+
+-- | Space between a field's box and its text; read-only text has no box.
+fieldInset :: FieldMode -> Float
+fieldInset mode = if mode == ReadOnly then 0 else fieldPad
+
+-- | Whether a field in this mode accepts an editing command, from the
+-- keyboard or its menu: read-only text still moves, selects and copies.
+commandAllowed :: FieldMode -> Command -> Bool
+commandAllowed mode cmd = mode /= ReadOnly || case cmd of
+  Move _ _ -> True
+  SelectAll -> True
+  Copy -> True
+  _ -> False
 
 -- An inactive editor retains undo history; an editing session also owns the
 -- focus-time value. The draft and its cancellation target cannot drift apart.
@@ -247,12 +251,6 @@ stepField event state = case (event, state) of
   (CancelEdit, Editing original _) -> Inactive (newEditor original)
   _ -> state
 
-textField :: FieldMode -> ChibiUI model Size -> Text -> (Input -> Text -> Text) -> ChibiUI model Text
-textField mode measure value transform = do
-  (wid, r) <- widgetRect measure
-  addFocusable wid r True
-  editTextField mode wid r value transform
-
 -- Stepping updates the same draft that is painted and subsequently edited.
 stepNumber :: (Eq a, Num a, Read a, Show a) => a -> Input -> Text -> Text
 stepNumber value inp t
@@ -267,8 +265,10 @@ stepNumber value inp t
 -- | The shared editing lifecycle: seeding the draft on focus,
 -- folding this frame's keys and text into it, drawing, and the value the
 -- caller should keep.
-editTextField :: FieldMode -> WidgetId -> Rect -> Text -> (Input -> Text -> Text) -> ChibiUI model Text
-editTextField mode wid r value transform = do
+textField :: FieldMode -> ChibiUI model Size -> Text -> (Input -> Text -> Text) -> ChibiUI model Text
+textField mode measure value transform = do
+  (wid, r) <- widgetRect measure
+  addFocusable wid r True
   th <- theme
   let readOnly = mode == ReadOnly
       k = slotOf wid
@@ -311,12 +311,18 @@ editTextField mode wid r value transform = do
           queue cmd = do
             requestFocus wid
             storeUpdate (insertSlot fieldDyn (slotKey SlotTextCommand k) (toDyn cmd))
-      openContextMenu wid r $
-        (if readOnly then [] else [("Undo", not (null (editUndo ed)), queue Undo),
-         ("Redo", not (null (editRedo ed)), queue Redo),
-         ("Cut", hasSelection, queue Cut)]) ++ [("Copy", hasSelection, queue Copy)] ++
-        (if readOnly then [] else [("Paste", True, queue Paste)]) ++
-        [("Select all", not (T.null draft), queue SelectAll)]
+      openContextMenu wid r
+        [ (title, enabled, queue cmd)
+        | (title, enabled, cmd) <-
+            [ ("Undo", not (null (editUndo ed)), Undo)
+            , ("Redo", not (null (editRedo ed)), Redo)
+            , ("Cut", hasSelection, Cut)
+            , ("Copy", hasSelection, Copy)
+            , ("Paste", True, Paste)
+            , ("Select all", not (T.null draft), SelectAll)
+            ]
+        , commandAllowed mode cmd
+        ]
       pure draft
     (False, Inactive _) -> paint (newEditor value) False False
 
@@ -332,7 +338,7 @@ stepPointer inp hoveredField active now previous
   | otherwise = KeepSelection
   where
     position = inputMousePos inp
-    delta p = (abs (v2X position - v2X p), abs (v2Y position - v2Y p))
+    delta p = let V2 x y = position `v2Sub` p in (abs x, abs y)
     moved = case previous of
       Just (ClickState _ p _) -> let (x, y) = delta p in x > 2 || y > 2
       Nothing -> False
@@ -346,8 +352,7 @@ editStep :: FieldMode -> WidgetId -> Rect -> Editor -> ChibiUI model Editor
 editStep mode wid r ed0 = do
   inp <- getInput
   hov <- hovered r
-  let readOnly = mode == ReadOnly
-      multiline = mode == MultiLine
+  let multiline = mode == MultiLine
       k = slotOf wid
       pressed = hov && pressedIn MouseLeft inp
       t = editText (editState ed0)
@@ -362,10 +367,10 @@ editStep mode wid r ed0 = do
     KeepSelection -> pure ed0
     gesture -> do
       let ls = textLines t
-          lineIndex = max 0 (min (length ls - 1)
-            (floor ((v2Y (inputMousePos inp) - rectY r - fieldPad + offsetY) / lineHeight)))
+          lineIndex = clamp 0 (length ls - 1)
+            (floor ((v2Y (inputMousePos inp) - rectY r - fieldPad + offsetY) / lineHeight))
           (start, line) = if multiline then ls !! lineIndex else (0, t)
-      caret <- (start +) <$> hitCaret line (v2X (inputMousePos inp) - rectX r - (if readOnly then 0 else fieldPad) + offset)
+      caret <- (start +) <$> hitCaret line (v2X (inputMousePos inp) - rectX r - fieldInset mode + offset)
       let anchor = if pressed && not (modShift (inputModifiers inp)) then caret else editAnchor (editState ed0)
           pointed = select anchor caret ed0
       case gesture of
@@ -379,12 +384,7 @@ editStep mode wid r ed0 = do
         _ -> pure pointed
   pending <- storeRead (lookupDyn (slotKey SlotTextCommand k))
   when (isJust pending) (storeUpdate (deleteSlot fieldDyn (slotKey SlotTextCommand k)))
-  let allowed cmd = not readOnly || case cmd of
-        Move _ _ -> True
-        SelectAll -> True
-        Copy -> True
-        _ -> False
-  foldM (runEdit multiline) ed1 (filter allowed (maybe [] (: []) pending ++ inputCommands multiline inp))
+  foldM (runEdit multiline) ed1 (filter (commandAllowed mode) (maybe [] (: []) pending ++ inputCommands multiline inp))
 
 runEdit :: Bool -> Editor -> Command -> ChibiUI model Editor
 runEdit multiline ed cmd = case cmd of
@@ -415,7 +415,6 @@ drawField mode k r ed focused reveal th = do
   let EditState t caret _ = editState ed
       readOnly = mode == ReadOnly
       multiline = mode == MultiLine
-      pad = if readOnly then 0 else fieldPad
       ls = if multiline then textLines t else [(0, t)]
       (caretRow, (lineStart, line)) = caretRowLine ls caret
   when (not readOnly) $ do
@@ -429,11 +428,12 @@ drawField mode k r ed focused reveal th = do
   widths <- if focused || multiline then mapM (measureText . snd) ls else pure []
   hov <- hovered r
   wheel <- scrollDelta
-  let innerX = rectX r + pad
-      innerW = max 0 (rectW r - pad * 2)
-      inner = Rect innerX (rectY r + pad) innerW (max 0 (rectH r - pad * 2))
-      wheelX = oldShift + if multiline && hov then v2X wheel * lineHeight * 3 else 0
-      wheelY = oldY + if multiline && hov then v2Y wheel * lineHeight * 3 else 0
+  let inset = rectInflate (-fieldInset mode) r
+      inner = inset {rectW = max 0 (rectW inset), rectH = max 0 (rectH inset)}
+      innerX = rectX inner
+      innerW = rectW inner
+      wheelX = oldShift + if multiline && hov then v2X wheel * scrollStep else 0
+      wheelY = oldY + if multiline && hov then v2Y wheel * scrollStep else 0
       keepVisible pos size extent offset
         | pos < offset = pos
         | pos + size > offset + extent = pos + size - extent
@@ -479,23 +479,15 @@ drawField mode k r ed focused reveal th = do
 -- | An image the backend has registered, drawn at @w@ x @h@.
 image :: Int -> Float -> Float -> ChibiUI model ()
 image img w h = do
-  (_, r) <- widgetRect (pure (Size w h))
-  drawImageUV img r
-
--- | Register an RGBA image under an id: @ieWidth@ x @ieHeight@ pixels, top
--- row first, four bytes per pixel. Call it every frame the image shows;
--- the backend uploads it when @version@ changes. Draw it with 'image'.
-useImageRgba :: Int -> Int -> Int -> Int -> BS.ByteString -> ChibiUI model ()
-useImageRgba = registerImage
+  (_, Rect x y rw rh) <- widgetRect (pure (Size w h))
+  drawIO $ \a -> emitQuadUV a (texImage img) x y (x + rw) (y + rh) colorWhite 0 0 1 1
 
 -- | A line plot of @values@, scaled to fit its lowest and highest samples;
 -- a flat series draws a line across the middle. The plot is at most 220
 -- wide and 80 tall; size it with 'nextWidth' and 'nextHeight'.
 plotLines :: [Float] -> ChibiUI model ()
 plotLines values = do
-  (_, r) <- widgetRect $ do
-    avail <- availWidth
-    pure (Size (min avail 220) 80)
+  (_, r) <- widgetRect (cappedSize 220 80)
   th <- theme
   fillRectUI r (themeSurface th)
   strokeRectUI r 1 (themeBorder th)
@@ -549,7 +541,7 @@ table headers rows = do
   let totalW = sum naturalWidths
       rowH = lineHeight + cellPadY * 2
       tableH = rowH * fromIntegral (1 + length rows)
-  (wid, r) <- widgetRect ((\avail -> Size (min avail totalW) tableH) <$> availWidth)
+  (wid, r) <- widgetRect (cappedSize totalW tableH)
   let selKey = slotKey SlotTableSel (slotOf wid)
       widths = map (\w -> if totalW > 0 then w * rectW r / totalW else 0) naturalWidths
       columns = zip (scanl (+) (rectX r) widths) widths
@@ -629,8 +621,10 @@ scrollColumn body = do
     fillRectUI (Rect (rectX trackR) thumbY barW thumbH) (themeBorder th)
   layoutState (const ((), parent))
   pure a
-  where
-    scrollStep = lineHeight * 3
+
+-- | How far one wheel step scrolls.
+scrollStep :: Float
+scrollStep = lineHeight * 3
 
 -- | A 1px horizontal rule across the line's width.
 separator :: ChibiUI model ()
@@ -638,7 +632,3 @@ separator = do
   (_, r) <- widgetRect ((\w -> Size w 1) <$> availWidth)
   th <- theme
   fillRectUI r (themeBorder th)
-
--- | The width a widget filling the line can take.
-availWidth :: ChibiUI model Float
-availWidth = availableWidth

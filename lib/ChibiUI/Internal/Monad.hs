@@ -10,6 +10,9 @@ module ChibiUI.Internal.Monad
   , mapModel
   , runChibiUI
   , askContext
+  , readCtx
+  , writeCtx
+  , modifyCtx
   , liftIO
   -- * Widget identity
   , nextId
@@ -29,7 +32,7 @@ module ChibiUI.Internal.Monad
   , place
   , layoutState
   , readLayout
-  , availableWidth
+  , availWidth
   , textSize
   , measureText
   , sameLine
@@ -78,19 +81,18 @@ module ChibiUI.Internal.Monad
   , drawTextIn
   , drawTextAt
   , textInRect
-  , drawImageUV
   -- * Frame control
   , requestFrame
   , requestFrameAt
   , quitUi
-  , registerImage
+  , useImageRgba
   , getClipboard
   , setClipboard
   ) where
 
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad (when)
-import Control.Monad.Reader (MonadReader (..), ReaderT (..), withReaderT)
+import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks, withReaderT)
 import Control.Monad.State.Class (MonadState (..), gets, modify, modify')
 import qualified Data.ByteString as BS
 import Data.IORef
@@ -107,7 +109,7 @@ import ChibiUI.Internal.Context
   , writeClipboard
   )
 import ChibiUI.Internal.Draw
-import ChibiUI.Internal.Font (lineHeight, fontDrawText, fontMeasure)
+import ChibiUI.Internal.Font (lineHeight, fontDrawText, fontMeasure, fontScale)
 import ChibiUI.Internal.Id
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (LayoutState)
@@ -168,6 +170,21 @@ runChibiUI ctx (ChibiUI m) = runReaderT m ctx
 askContext :: ChibiUI model (Context model)
 askContext = ask
 
+-- | Read one of the context's references.
+{-# INLINE readCtx #-}
+readCtx :: (Context model -> IORef a) -> ChibiUI model a
+readCtx field = asks field >>= liftIO . readIORef
+
+-- | Write one of the context's references.
+{-# INLINE writeCtx #-}
+writeCtx :: (Context model -> IORef a) -> a -> ChibiUI model ()
+writeCtx field v = asks field >>= \ref -> liftIO (writeIORef ref v)
+
+-- | Strictly modify one of the context's references.
+{-# INLINE modifyCtx #-}
+modifyCtx :: (Context model -> IORef a) -> (a -> a) -> ChibiUI model ()
+modifyCtx field f = asks field >>= \ref -> liftIO (modifyIORef' ref f)
+
 -- | This widget's id: the next sibling position hashed into the container's
 -- path. The same widgets must run in the same order every frame, or state
 -- and input follow the wrong widget.
@@ -178,8 +195,8 @@ nextId = do
   liftIO $ do
     cid <- readIORef (ctxIdPath ctx)
     sib <- readIORef (ctxIdSib ctx)
-    writeIORef (ctxIdSib ctx) (sib + 1)
-    pure (idContextWidgetId (IdContext cid sib))
+    writeIORef (ctxIdSib ctx) $! sib + 1
+    pure $! idContextWidgetId (IdContext cid sib)
 
 -- | Run a container's body: the next sibling position becomes the child
 -- path, and the body's widgets count from a fresh sibling counter.
@@ -197,14 +214,14 @@ withIdScope enter body = do
   ctx <- ask
   parent' <- liftIO $ do
     parent <- IdContext <$> readIORef (ctxIdPath ctx) <*> readIORef (ctxIdSib ctx)
-    let (parent', child) = enter parent
-    writeIORef (ctxIdPath ctx) (currentId child)
-    writeIORef (ctxIdSib ctx) (siblingId child)
+    let !(parent', child) = enter parent
+    writeIORef (ctxIdPath ctx) $! currentId child
+    writeIORef (ctxIdSib ctx) $! siblingId child
     pure parent'
   a <- body
   liftIO $ do
-    writeIORef (ctxIdPath ctx) (currentId parent')
-    writeIORef (ctxIdSib ctx) (siblingId parent')
+    writeIORef (ctxIdPath ctx) $! currentId parent'
+    writeIORef (ctxIdSib ctx) $! siblingId parent'
   pure a
 
 fnv1a :: Text -> Word64
@@ -217,15 +234,11 @@ slotOf = fromIntegral . hashWidgetId
 
 -- | Update the store.
 storeUpdate :: (WidgetStore -> WidgetStore) -> ChibiUI model ()
-storeUpdate f = do
-  ctx <- ask
-  liftIO (modifyIORef' (ctxStore ctx) f)
+storeUpdate = modifyCtx ctxStore
 
 -- | Read the store.
 storeRead :: (WidgetStore -> a) -> ChibiUI model a
-storeRead f = do
-  ctx <- ask
-  liftIO (f <$> readIORef (ctxStore ctx))
+storeRead f = f <$> readCtx ctxStore
 
 -- | Place a widget at the cursor: take the rectangle its size needs,
 -- advance the cursor past it, and return the rectangle. A 'nextWidth' or
@@ -248,24 +261,22 @@ layoutState transition = do
 
 -- | The cursor as it stands.
 readLayout :: ChibiUI model LayoutState
-readLayout = do
-  ctx <- ask
-  liftIO (readIORef (ctxLayout ctx))
+readLayout = readCtx ctxLayout
 
 layoutCommand :: Layout.LayoutCommand -> ChibiUI model ()
 layoutCommand command = do
   gap' <- themeGap <$> theme
   layoutState (\ls -> ((), Layout.stepLayout gap' command ls))
 
--- | Remaining width at the cursor, accounting for siblings and indentation.
-availableWidth :: ChibiUI model Float
-availableWidth = Layout.remainingWidth <$> readLayout
+-- | The width a widget filling the line can take: the remaining width at
+-- the cursor, accounting for siblings and indentation.
+availWidth :: ChibiUI model Float
+availWidth = Layout.remainingWidth <$> readLayout
 
 -- | The width of one line of text, in logical pixels.
 measureText :: Text -> ChibiUI model Float
 measureText t = do
-  ctx <- ask
-  font <- liftIO (readIORef (ctxFont ctx))
+  font <- readCtx ctxFont
   liftIO (fontMeasure font t)
 
 -- | The size of one line of text, for widgets that wrap it.
@@ -359,45 +370,39 @@ mouseHeld = heldIn MouseLeft <$> getInput
 -- | Whether a key went down this frame. A focused text field reads keys
 -- for itself, so this reports 'False' while one has the keyboard.
 keyPressed :: Key -> ChibiUI model Bool
-keyPressed k = appKey (pressedIn k)
+keyPressed = appKey . pressedIn
 
 -- | Whether a key is down. Also gated on typing, like 'keyPressed'.
 keyHeld :: Key -> ChibiUI model Bool
-keyHeld k = appKey (heldIn k)
+keyHeld = appKey . heldIn
 
+-- | An input test that stands down while a text field has the keyboard.
 appKey :: (Input -> Bool) -> ChibiUI model Bool
 appKey test = do
-  ctx <- ask
-  typing <- liftIO (readIORef (ctxTyping ctx))
+  typing <- readCtx ctxTyping
   (not typing &&) . test <$> getInput
 
 -- | An application shortcut, matched exactly. Suppressed while a text
 -- field is focused, so its editing shortcuts cannot trigger app actions.
 shortcut :: Modifiers -> Key -> ChibiUI model Bool
-shortcut mods k = do
-  inp <- getInput
-  pressed <- keyPressed k
-  pure (pressed && inputModifiers inp == mods)
+shortcut mods k = appKey $ \inp -> pressedIn k inp && inputModifiers inp == mods
 
 -- | A portable Ctrl/Command shortcut; the Bool requests Shift as well.
 primaryShortcut :: Bool -> Key -> ChibiUI model Bool
-primaryShortcut shift k = do
-  inp <- getInput
-  pressed <- keyPressed k
+primaryShortcut shift k = appKey $ \inp ->
   let m = inputModifiers inp
-  pure (pressed && modPrimary m && modShift m == shift && not (modAlt m)
-    && not (modCtrl m && modSuper m))
+   in pressedIn k inp && modPrimary m && modShift m == shift && not (modAlt m)
+        && not (modCtrl m && modSuper m)
 
 -- | Current device pixels per logical UI pixel.
 uiScale :: ChibiUI model Float
-uiScale = askContext >>= liftIO . readIORef . ctxScale
+uiScale = readCtx ctxFont >>= liftIO . fontScale
 
 -- | Request a device scale; zero restores automatic monitor DPI. Takes
 -- effect in the next native frame. Non-finite values are ignored.
 setUiScale :: Float -> ChibiUI model ()
 setUiScale scale = when (not (isNaN scale || isInfinite scale)) $ do
-  ctx <- askContext
-  liftIO (writeIORef (ctxScaleOverride ctx) (max 0 scale))
+  writeCtx ctxScaleOverride (max 0 scale)
   requestFrame
 
 -- | The window's size, in logical pixels.
@@ -410,26 +415,18 @@ windowWidth = sizeW <$> windowSize
 
 -- | Monotonic seconds, for blink and other time-based looks.
 uiTime :: ChibiUI model Double
-uiTime = do
-  ctx <- ask
-  liftIO (readIORef (ctxTime ctx))
+uiTime = readCtx ctxTime
 
 -- | The wheel steps this frame: x rightward, y downward.
 scrollDelta :: ChibiUI model V2
 scrollDelta = inputScroll <$> getInput
 
-readFocus :: ChibiUI model WidgetId
-readFocus = do
-  ctx <- ask
-  liftIO (readIORef (ctxFocus ctx))
-
 -- | Whether the pointer is over a rectangle, in window coordinates.
 hovered :: Rect -> ChibiUI model Bool
 hovered r = do
   p <- mousePos
-  ctx <- ask
-  clip <- liftIO (currentClip (ctxArena ctx))
-  blocked <- liftIO (readIORef (ctxInputBlocked ctx))
+  clip <- asks ctxArena >>= liftIO . currentClip
+  blocked <- readCtx ctxInputBlocked
   pure (not blocked && rectHit r p && rectHit clip p)
 
 -- | Claim the pointer for a widget while its button is held. 'True' when
@@ -445,27 +442,21 @@ claimActive wid = do
 
 -- | Whether the widget owns the pointer grab.
 isActive :: WidgetId -> ChibiUI model Bool
-isActive wid = do
-  ctx <- ask
-  liftIO ((== wid) <$> readIORef (ctxActive ctx))
+isActive wid = (== wid) <$> readCtx ctxActive
 
 -- | Whether the widget has keyboard focus.
 isFocused :: WidgetId -> ChibiUI model Bool
-isFocused wid = (== wid) <$> readFocus
+isFocused wid = (== wid) <$> readCtx ctxFocus
 
 -- | Give a widget the keyboard.
 requestFocus :: WidgetId -> ChibiUI model ()
 requestFocus wid = do
-  ctx <- ask
-  liftIO $ do
-    writeIORef (ctxFocus ctx) wid
-    writeIORef (ctxFocusRequested ctx) True
+  writeCtx ctxFocus wid
+  writeCtx ctxFocusRequested True
 
 -- | Take the keyboard from whatever widget holds it.
 blurFocus :: ChibiUI model ()
-blurFocus = do
-  ctx <- ask
-  liftIO (writeIORef (ctxFocus ctx) noWidget)
+blurFocus = writeCtx ctxFocus noWidget
 
 -- | Mark a widget placed at @r@ as reachable with Tab, in declaration
 -- order, while any of it shows through the clip. A widget that takes
@@ -480,9 +471,7 @@ addFocusable wid r typing = do
 
 -- | Ask for a pointer shape while the pointer is over this widget.
 wantCursor :: UiCursorKind -> ChibiUI model ()
-wantCursor k = do
-  ctx <- ask
-  liftIO (writeIORef (ctxCursor ctx) k)
+wantCursor = writeCtx ctxCursor
 
 -- | Record where a widget landed this frame. Hit tests read these rects
 -- directly: the cursor layout is deterministic, so a widget's rect is
@@ -497,19 +486,14 @@ recordRect wid r = do
 
 -- | The theme, for colours and spacing.
 theme :: ChibiUI model Theme
-theme = do
-  ctx <- ask
-  liftIO (readIORef (ctxTheme ctx))
+theme = readCtx ctxTheme
 
 -- | Draw a body with another theme.
 withTheme :: Theme -> ChibiUI model a -> ChibiUI model a
 withTheme t body = do
-  ctx <- ask
-  old <- liftIO (readIORef (ctxTheme ctx))
-  liftIO (writeIORef (ctxTheme ctx) t)
-  a <- body
-  liftIO (writeIORef (ctxTheme ctx) old)
-  pure a
+  old <- theme
+  writeCtx ctxTheme t
+  body <* writeCtx ctxTheme old
 
 withTextAlign :: TextAlign -> ChibiUI model a -> ChibiUI model a
 withTextAlign align body = do
@@ -521,13 +505,10 @@ withTextAlign align body = do
 alignTextToFrame :: ChibiUI model ()
 alignTextToFrame = nextHeight fieldHeight
 
--- | Emit into the draw list. The arena's clip and texture are whatever the
--- caller left them as; save and restore if that matters.
+-- | Emit into the draw list, under the current clip.
 {-# INLINE drawIO #-}
 drawIO :: (DrawArena -> IO ()) -> ChibiUI model ()
-drawIO f = do
-  ctx <- ask
-  liftIO (f (ctxArena ctx))
+drawIO f = asks ctxArena >>= liftIO . f
 
 -- | Restrict both painting and pointer hit tests to a fixed rectangle.
 withClip :: Rect -> ChibiUI model a -> ChibiUI model a
@@ -575,9 +556,7 @@ drawGlyphs x y t col = do
     when (cw > 0 && ch > 0 && x < cx + cw + lineHeight
       && y < cy + ch + lineHeight && y + lineHeight * 2 > cy) $ do
       font <- readIORef (ctxFont ctx)
-      setTexture a texGlyphAtlas
       fontDrawText font a x y col t
-      setTexture a texFlat
 
 -- | Centre one line of text in a rectangle.
 textInRect :: Rect -> Text -> Color -> ChibiUI model ()
@@ -587,49 +566,30 @@ textInRect r t col = do
     (V2 (rectX r + rectW r / 2) (alignedTextY (themeTextAlign th) r))
     0.5 0 t col
 
--- | An image the backend registered, drawn at a size. Texture id 2 or more.
-drawImageUV :: Int -> Rect -> ChibiUI model ()
-drawImageUV img r = drawIO $ \a -> do
-  setTexture a (texImage img)
-  emitQuadUV a (rectX r) (rectY r) (rectX r + rectW r) (rectY r + rectH r) colorWhite 0 0 1 1
-  setTexture a texFlat
-
 -- | Ask for another frame even without input, as a view that changes on a
 -- timer does.
 requestFrame :: ChibiUI model ()
-requestFrame = do
-  ctx <- ask
-  liftIO (writeIORef (ctxFrameRequest ctx) True)
+requestFrame = writeCtx ctxFrameRequest True
 
 -- | Ask for a frame once 'uiTime' reaches @t@, as a blink or a timeout
 -- does; the loop sleeps until then unless input comes first.
 requestFrameAt :: Double -> ChibiUI model ()
-requestFrameAt t = do
-  ctx <- ask
-  liftIO (modifyIORef' (ctxWakeAt ctx) (min t))
+requestFrameAt t = modifyCtx ctxWakeAt (min t)
 
 -- | End the session after this frame.
 quitUi :: ChibiUI model ()
-quitUi = do
-  ctx <- ask
-  liftIO (writeIORef (ctxQuit ctx) True)
+quitUi = writeCtx ctxQuit True
 
--- | Register an RGBA image under an id, @w@ x @h@ pixels, top row first.
--- Call it every frame the image shows; the backend uploads it when the
--- version changes.
-registerImage :: Int -> Int -> Int -> Int -> BS.ByteString -> ChibiUI model ()
-registerImage img w h ver px = do
-  ctx <- ask
-  liftIO (modifyIORef' (ctxImages ctx) (IM.insert img (ImageEntry w h ver px)))
+-- | Register an RGBA image under an id: @w@ x @h@ pixels, top row first,
+-- four bytes per pixel. Call it every frame the image shows; the backend
+-- uploads it when @version@ changes. Draw it with 'ChibiUI.image'.
+useImageRgba :: Int -> Int -> Int -> Int -> BS.ByteString -> ChibiUI model ()
+useImageRgba img w h version px = modifyCtx ctxImages (IM.insert img (ImageEntry w h version px))
 
 -- | The system clipboard's text, if it holds any.
 getClipboard :: ChibiUI model (Maybe Text)
-getClipboard = do
-  ctx <- ask
-  liftIO (readClipboard ctx)
+getClipboard = ask >>= liftIO . readClipboard
 
 -- | Replace the system clipboard's text.
 setClipboard :: Text -> ChibiUI model ()
-setClipboard t = do
-  ctx <- ask
-  liftIO (writeClipboard ctx t)
+setClipboard t = ask >>= liftIO . (`writeClipboard` t)

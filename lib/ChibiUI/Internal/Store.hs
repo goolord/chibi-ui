@@ -7,8 +7,6 @@ module ChibiUI.Internal.Store
   , fieldInt
   , fieldFloat
   , fieldDyn
-  , overField
-  , lookupSlot
   , lookupDyn
   , findSlot
   , memberSlot

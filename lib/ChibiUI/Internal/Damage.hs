@@ -32,8 +32,8 @@ import ChibiUI.Internal.Types
   , Size (..)
   , foldUpTo
   , rectArea
-  , rectIntersect
   , rectNonEmpty
+  , rectsOverlap
   , rectUnion
   )
 
@@ -59,9 +59,9 @@ data FrameSnapshot = FrameSnapshot
   { snapVertices :: !BS.ByteString
   -- ^ The used prefix of the vertex buffer: quad @k@ lives at byte
     -- @k * 4 * vertexSize@.
-  , snapBatches :: ![DrawCmd]
-  -- ^ The frame's commands. Only their textures are compared: index
-    -- ranges shift when quads are inserted or removed, which the quad diff
+  , snapTextures :: ![Int]
+  -- ^ Each batch's texture, in order. Index ranges are not kept: they
+    -- shift when quads are inserted or removed, which the quad diff
     -- already sees; a texture changing in place can repaint different
     -- pixels over identical geometry and forces a full frame.
   }
@@ -94,7 +94,7 @@ takeSnapshot dd = do
   pure
     FrameSnapshot
       { snapVertices = verts
-      , snapBatches = drawCommands dd
+      , snapTextures = map cmdTextureId (drawCommands dd)
       }
 
 -- | Diff a snapshot against the frame just drawn. Texture contents are
@@ -104,38 +104,19 @@ takeSnapshot dd = do
 frameDamage :: FrameSnapshot -> DrawData -> Size -> IO Damage
 frameDamage snap dd window = do
   same <- vertexBytesEq (snapVertices snap) dd
-  if same && batchesEq (snapBatches snap) (drawCommands dd)
+  let old = snapTextures snap
+      new = map cmdTextureId (drawCommands dd)
+  if same && old == new
     then pure DamageNone
     else
-      if batchesInPlace (snapBatches snap) (drawCommands dd)
+      -- The same batch structure over different textures.
+      if old /= new && length old == length new
         then pure DamageFull
         else withForeignPtr (drawVertices dd) $ \vp -> do
           let oldN = snapQuadCount snap
               newN = drawVertexCount dd `div` 4
           rects <- changedQuadRects (snapVertices snap) vp (min oldN newN) oldN newN
           pure (maybe DamageFull (mergeDamage window) rects)
-
--- | Whether the frame's batches equal the snapshot's, element for element,
--- compared field-wise without materializing anything.
-batchesEq :: [DrawCmd] -> [DrawCmd] -> Bool
-batchesEq (s : ss) (c : cs) = batchEq s c && batchesEq ss cs
-batchesEq [] [] = True
-batchesEq _ _ = False
-
--- | Whether two batches share a texture.
-batchEq :: DrawCmd -> DrawCmd -> Bool
-batchEq a b = cmdTextureId a == cmdTextureId b
-
--- | Whether the two batch lists have equal lengths with a batch that
--- changed in place: same structure, different texture somewhere, which
--- can repaint different pixels over identical geometry.
-
-batchesInPlace :: [DrawCmd] -> [DrawCmd] -> Bool
-batchesInPlace = walk False
-  where
-    walk !diff (s : ss) (c : cs) = walk (diff || not (batchEq s c)) ss cs
-    walk diff [] [] = diff
-    walk _ _ _ = False
 
 -- | Whether the frame's used vertex prefix equals the snapshot's bytes,
 -- compared in place: the arena's buffer against the snapshot's copy.
@@ -177,11 +158,10 @@ changedQuadRects old new n oldN newN =
     diff <- diffQuads oldP new n
     case diff of
       Nothing -> pure Nothing
-      Just changed -> do
-        let touched = changed ++ [n .. oldN - 1] ++ [n .. newN - 1]
-        if length touched > maxChangedQuads
-          then pure Nothing
-          else do
+      Just changed
+        | length changed + (oldN - n) + (newN - n) > maxChangedQuads -> pure Nothing
+        | otherwise -> do
+            let touched = changed ++ [n .. oldN - 1] ++ [n .. newN - 1]
             -- Both sides of every changed quad: the old area may need
             -- clearing even where the new frame draws nothing.
             oldSide <- mapM (quadAtPtr oldP) [k | k <- touched, k < oldN]
@@ -234,25 +214,24 @@ mergeDamage window rs0
   | length merged > maxDamageRects = DamageRects [union]
   | otherwise = DamageRects merged
   where
-    merged = mergeAll (filter rectNonEmpty rs0)
+    merged = mergeRects (filter rectNonEmpty rs0)
     union = foldr1 rectUnion merged
 
--- | Repeatedly union any two overlapping rectangles until none overlap.
-mergeAll :: [Rect] -> [Rect]
-mergeAll rs = let (out, changed) = mergeStep rs in if changed then mergeAll out else out
-
--- | One merging pass over the rectangles.
-mergeStep :: [Rect] -> ([Rect], Bool)
-mergeStep [] = ([], False)
-mergeStep (r : rs) = case takeIntersecting r rs of
-  Just (hit, rest) -> mergeStep (rectUnion r hit : rest)
-  Nothing -> let (out, changed) = mergeStep rs in (r : out, changed)
+-- | One merging pass: each rectangle absorbs every later one it overlaps,
+-- growing as it does, before the pass moves on. A kept rectangle can
+-- still overlap one that grew after it; the damage stays covered either
+-- way.
+mergeRects :: [Rect] -> [Rect]
+mergeRects [] = []
+mergeRects (r : rs) = case takeIntersecting r rs of
+  Just (hit, rest) -> mergeRects (rectUnion r hit : rest)
+  Nothing -> r : mergeRects rs
 
 -- | The first rectangle overlapping @r@, and the others without it.
 takeIntersecting :: Rect -> [Rect] -> Maybe (Rect, [Rect])
 takeIntersecting r = go []
   where
     go _ [] = Nothing
-    go skipped (x : rest) = case rectIntersect r x of
-      Just _ -> Just (x, reverse skipped ++ rest)
-      Nothing -> go (x : skipped) rest
+    go skipped (x : rest)
+      | rectsOverlap r x = Just (x, reverse skipped ++ rest)
+      | otherwise = go (x : skipped) rest

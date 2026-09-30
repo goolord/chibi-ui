@@ -18,12 +18,10 @@ module ChibiUI.Internal.Draw
   , pushClip
   , popClip
   , currentClip
-  , setTexture
   , fillRect
   , strokeRect
   , emitQuadUV
   , vertexSize
-  , indexSize
   ) where
 
 import Control.Monad (when)
@@ -35,12 +33,9 @@ import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr, plusPtr)
 import Foreign.Storable (pokeByteOff)
 import ChibiUI.Internal.Types
-  ( Color (..)
+  ( Color
   , Rect (..)
-  , colorA
-  , colorB
-  , colorG
-  , colorR
+  , colorFloats
   , rectIntersect
   )
 import ChibiUI.Internal.URef
@@ -106,7 +101,6 @@ data DrawArena = DrawArena
   -- lives in the @daBatch*@ refs below instead, so a quad that continues
   -- its batch allocates nothing.
   , daLastClip :: !(IORef Rect)
-  , daLastTexture :: !(IORef Int)
   , daClipStack :: !(IORef [Rect])
   , daBatchTexture :: !(IORef Int)
   , daBatchStart :: !URef
@@ -126,7 +120,6 @@ newDrawArena = do
   iref <- newIORef ibuf
   cref <- newIORef []
   lcref <- newIORef infiniteClip
-  ltref <- newIORef texFlat
   cstack <- newIORef []
   vcap <- newIORef 0
   icap <- newIORef 0
@@ -147,7 +140,6 @@ newDrawArena = do
       , daIndexCount = icnt
       , daCommands = cref
       , daLastClip = lcref
-      , daLastTexture = ltref
       , daClipStack = cstack
       , daBatchTexture = btex
       , daBatchStart = bstart
@@ -161,15 +153,14 @@ newBuffer = mallocForeignPtrBytes . max 1
 infiniteClip :: Rect
 infiniteClip = Rect 0 0 1e9 1e9
 
--- | Drop the frame's geometry and reset the clip and texture. Buffers keep
--- their capacity.
+-- | Drop the frame's geometry and reset the clip. Buffers keep their
+-- capacity.
 resetDrawArena :: DrawArena -> IO ()
 resetDrawArena a = do
   writeURef (daVertexCount a) 0
   writeURef (daIndexCount a) 0
   writeIORef (daCommands a) []
   writeIORef (daLastClip a) infiniteClip
-  writeIORef (daLastTexture a) texFlat
   writeIORef (daClipStack a) []
   writeIORef (daBatchTexture a) texFlat
   writeURef (daBatchStart a) 0
@@ -256,16 +247,13 @@ popClip a = do
       writeIORef (daLastClip a) r
     [] -> pure ()
 
--- | Set the texture the next commands sample. A change starts a new batch.
-setTexture :: DrawArena -> Int -> IO ()
-setTexture a t = writeIORef (daLastTexture a) t
-
--- | Append a quad's vertices and indices under the current clip and
--- texture. The quad is @x0, y0, x1, y1@ in logical pixels with the given
--- colour, and UV corners for textured batches (ignored by flat geometry).
+-- | Append a quad sampling texture @tex@ under the current clip. The quad
+-- is @x0, y0, x1, y1@ in logical pixels with the given colour, and UV
+-- corners for textured batches (ignored by flat geometry). A texture
+-- change starts a new batch.
 {-# INLINE emitQuadUV #-}
-emitQuadUV :: DrawArena -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO ()
-emitQuadUV a !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
+emitQuadUV :: DrawArena -> Int -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO ()
+emitQuadUV a !tex !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
   clip <- readIORef (daLastClip a)
   let !(cx0, cy0, cx1, cy1) = clipEdges clip
   if x1 <= x0 || y1 <= y0 || cx1 <= cx0 || cy1 <= cy0
@@ -283,7 +271,7 @@ emitQuadUV a !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
           uy y = if h > 0 then v0 + (v1 - v0) * ((y - y0) / h) else v0
       base <- pushVertices a nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
       pushIndices a base
-      batchCommand a
+      batchCommand a tex
 
 -- | Corners of a rect as @x0, y0, x1, y1@.
 {-# INLINE clipEdges #-}
@@ -293,7 +281,7 @@ clipEdges (Rect x y w h) = (x, y, x + w, y + h)
 -- | A solid rectangle.
 {-# INLINE fillRect #-}
 fillRect :: DrawArena -> Rect -> Color -> IO ()
-fillRect a (Rect x y w h) c = emitQuadUV a x y (x + w) (y + h) c 0 0 0 0
+fillRect a (Rect x y w h) c = emitQuadUV a texFlat x y (x + w) (y + h) c 0 0 0 0
 
 -- | A border of @bw@ logical pixels, drawn inside the rectangle's edges.
 strokeRect :: DrawArena -> Rect -> Float -> Color -> IO ()
@@ -333,9 +321,8 @@ pushIndices a !base = do
 -- batch only bumps a counter, so the common run of quads under one
 -- texture allocates nothing per quad.
 {-# INLINE batchCommand #-}
-batchCommand :: DrawArena -> IO ()
-batchCommand a = do
-  texture <- readIORef (daLastTexture a)
+batchCommand :: DrawArena -> Int -> IO ()
+batchCommand a !texture = do
   idxCount <- readURef (daIndexCount a)
   let idxStart = idxCount - 6
   openTex <- readIORef (daBatchTexture a)
@@ -347,7 +334,6 @@ batchCommand a = do
         openStart <- readURef (daBatchStart a)
         modifyIORef' (daCommands a) (DrawCmd openTex (fromIntegral openStart) (fromIntegral openCount) :)
       writeIORef (daBatchTexture a) texture
-
       writeURef (daBatchStart a) idxStart
       writeURef (daBatchCount a) 6
 
@@ -356,10 +342,7 @@ batchCommand a = do
 writeQuadVertices :: Ptr Word8 -> Int -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO ()
 writeQuadVertices !buf !n !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
   let !base = buf `plusPtr` (n * vertexSize)
-      !r = fromIntegral (colorR col) / 255
-      !g = fromIntegral (colorG col) / 255
-      !b = fromIntegral (colorB col) / 255
-      !a = fromIntegral (colorA col) / 255
+      !(r, g, b, a) = colorFloats col
       put !i !x !y !u !v = do
         let !p = base `plusPtr` (i * vertexSize)
         pokeByteOff p 0 x

@@ -32,7 +32,7 @@ openContextMenu wid r items = do
   ctx <- askContext
   inp <- getInput
   hov <- hovered r
-  focus <- liftIO (readIORef (ctxFocus ctx))
+  focus <- readCtx ctxFocus
   focusRect <- liftIO (readIORef (ctxRects ctx) >>= \t -> lookupRect t (slotOf focus))
   let within (Rect x y w h) = x >= rectX r && y >= rectY r
         && x + w <= rectX r + rectW r && y + h <= rectY r + rectH r
@@ -42,12 +42,20 @@ openContextMenu wid r items = do
   when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $ do
     let position = if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp
         actions = [(t, enabled, runChibiUI ctx action) | (t, enabled, action) <- items]
-        selected = fromMaybe (-1) (listToMaybe [i | (i, (_, True, _)) <- zip [0 ..] items])
+        selected = firstOr (enabledIndices items)
     liftIO $ do
       writeIORef (ctxPopup ctx) (Just (Popup wid position actions selected (inputMousePos inp)))
       writeIORef (ctxActive ctx) noWidget
       writeIORef (ctxInputBlocked ctx) True
     requestFrame
+
+-- | The positions of the enabled items.
+enabledIndices :: [(a, Bool, b)] -> [Int]
+enabledIndices items = [i | (i, (_, True, _)) <- zip [0 ..] items]
+
+-- | The first index, or -1 for none.
+firstOr :: [Int] -> Int
+firstOr = fromMaybe (-1) . listToMaybe
 
 geometry :: Popup -> ChibiUI model (Rect, Float)
 geometry popup = do
@@ -69,7 +77,7 @@ rowAt r height inp
 processPopup :: ChibiUI model Bool
 processPopup = do
   ctx <- askContext
-  current <- liftIO (readIORef (ctxPopup ctx))
+  current <- readCtx ctxPopup
   case current of
     Nothing -> pure False
     Just popup -> do
@@ -84,17 +92,15 @@ processPopup = do
 stepPopup :: Input -> Maybe Int -> Popup -> (Maybe Popup, Maybe (IO ()))
 stepPopup inp pointerRow popup = (next, action)
   where
-    enabled = [(i, run) | (i, (_, True, run)) <- zip [0 ..] (popupItems popup)]
-    indices = map fst enabled
-    first = fromMaybe (-1) . listToMaybe
+    indices = enabledIndices (popupItems popup)
     step backwards =
       let order = if backwards then reverse indices else indices
           beyond = if backwards then (< popupSelected popup) else (> popupSelected popup)
-       in first (filter beyond order ++ order)
+       in firstOr (filter beyond order ++ order)
     selected | pressedIn KeyDown inp = step False
              | pressedIn KeyUp inp = step True
-             | pressedIn KeyHome inp = first indices
-             | pressedIn KeyEnd inp = first (reverse indices)
+             | pressedIn KeyHome inp = firstOr indices
+             | pressedIn KeyEnd inp = firstOr (reverse indices)
              | inputMousePos inp /= popupPointer popup,
                Just i <- pointerRow, i `elem` indices = i
              | otherwise = popupSelected popup
@@ -102,7 +108,10 @@ stepPopup inp pointerRow popup = (next, action)
     chosen | clicked = pointerRow
            | pressedIn KeyEnter inp = Just selected
            | otherwise = Nothing
-    action = chosen >>= (`lookup` enabled)
+    action = do
+      i <- chosen
+      (_, True, run) <- lookup i (zip [0 ..] (popupItems popup))
+      pure run
     dismiss = clicked || pressedIn MouseRight inp || any (`pressedIn` inp) [KeyEscape, KeyTab]
     next | dismiss || isJust action = Nothing
          | otherwise = Just popup {popupSelected = selected, popupPointer = inputMousePos inp}
@@ -110,7 +119,7 @@ stepPopup inp pointerRow popup = (next, action)
 paintPopup :: Input -> ChibiUI model ()
 paintPopup inp = do
   ctx <- askContext
-  current <- liftIO (readIORef (ctxPopup ctx))
+  current <- readCtx ctxPopup
   forM_ current $ \popup -> do
     exists <- liftIO (readIORef (ctxRects ctx) >>= \t -> memberRect t (slotOf (popupOwner popup)))
     if not exists

@@ -9,13 +9,13 @@ import Data.IORef
 import Data.List (elemIndex)
 import Data.Maybe (fromMaybe)
 import GHC.Clock (getMonotonicTime)
-import ChibiUI.Internal.Context (Context (..), noWidget)
+import ChibiUI.Internal.Context (Context (..), noWake, noWidget)
 import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Id (WidgetId, initialIdPath)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Menu (processPopup, paintPopup)
-import ChibiUI.Internal.Layout (LayoutState (..), freshLayout)
+import ChibiUI.Internal.Layout (beginViewport, freshLayout)
 import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
 import ChibiUI.Internal.Types (Rect (..), Size (..))
@@ -32,7 +32,7 @@ runFrame ctx inp view = do
   writeIORef (ctxFocusables ctx) []
   writeIORef (ctxCursor ctx) UiCursorDefault
   writeIORef (ctxFrameRequest ctx) False
-  writeIORef (ctxWakeAt ctx) (1 / 0)
+  writeIORef (ctxWakeAt ctx) noWake
   -- Widget ids count from the root again, so the same view derives the
   -- same ids every frame.
   writeIORef (ctxIdPath ctx) initialIdPath
@@ -45,9 +45,7 @@ runFrame ctx inp view = do
   theme0 <- readIORef (ctxTheme ctx)
   let pad = themeWindowPad theme0
       Size winW winH = inputWindowSize inp
-  writeIORef (ctxLayout ctx) freshLayout
-    { lsPenX = pad, lsLineY = pad, lsIndent = pad, lsAvailW = max 0 (winW - pad * 2)
-    , lsBottom = winH - pad, lsLast = Rect pad pad 0 0 }
+  writeIORef (ctxLayout ctx) (beginViewport (Rect pad pad (winW - pad * 2) (winH - pad * 2)) freshLayout)
   focusBefore <- readIORef (ctxFocus ctx)
   blocked <- runChibiUI ctx processPopup
   writeIORef (ctxInputBlocked ctx) blocked
@@ -62,7 +60,7 @@ runFrame ctx inp view = do
   focusReq <- readIORef (ctxFocusRequested ctx)
   modifyIORef' (ctxFocus ctx) (resolveFocus inp blocked focusReq (map fst fs))
   focusAfter <- readIORef (ctxFocus ctx)
-  writeIORef (ctxTyping ctx) (lookup focusAfter fs == Just True)
+  writeIORef (ctxTyping ctx) $! lookup focusAfter fs == Just True
 
   -- Focus resolves after painting. Settle the old/new field visuals and
   -- drafts even when the user produces no further native event.

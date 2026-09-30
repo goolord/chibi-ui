@@ -12,7 +12,7 @@ module ChibiUI.Rgfw.Internal.Session
   , defaultRgfwOptions
   , WindowSettings (..)
   , defaultWindowSettings
-  , runChibiAppWith
+  , runChibiApp
   ) where
 
 import Control.Concurrent (rtsSupportsBoundThreads, runInBoundThread)
@@ -23,7 +23,7 @@ import Data.Char (chr, isPrint, toLower)
 import Data.IORef
 import Data.Maybe (isJust, listToMaybe)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 ()
+import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Text as T
 import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (withForeignPtr)
@@ -44,9 +44,9 @@ import ChibiUI.Internal.Damage (trackFrame)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
-import ChibiUI.Internal.Font (Font, fontAtlasPixels, fontAtlasSize, fontFree, newFont)
+import ChibiUI.Internal.Font (Font, atlasSize, fontAtlasPixels, fontFree, fontScale, newFont)
 import ChibiUI.Internal.Style (Theme, defaultTheme, themeWindow)
-import ChibiUI.Internal.Types (Size (..), V2 (..), validScale)
+import ChibiUI.Internal.Types (Size (..), V2 (..), v2Sub, validScale)
 import ChibiUI.Rgfw.Internal.Gl (GlRenderer, freeGlRenderer, newGlRenderer, readRetainedPixels, renderFrameGl)
 import qualified RGFW as R
 
@@ -89,11 +89,13 @@ defaultRgfwOptions =
     , optFontPath = Nothing
     }
 
--- | Run a view in an owned RGFW/OpenGL window until the view quits or the
--- window closes. Native resources are released on exit; window creation
--- failure prints a message and returns.
-runChibiAppWith :: RgfwOptions -> model -> ChibiUI model () -> IO ()
-runChibiAppWith opts initial view = inBoundThread $
+-- | Run a view with an initial application model in an owned RGFW/OpenGL
+-- window, with @opts@' window, theme, and scale, until the view quits or
+-- the window closes. Model updates persist across frames. Native resources
+-- are released on exit; window creation failure prints a message and
+-- returns.
+runChibiApp :: RgfwOptions -> model -> ChibiUI model () -> IO ()
+runChibiApp opts initial view = inBoundThread $
   bracket create (mapM_ R.closeWindow) $ \mWin -> case mWin of
     Nothing -> putStrLn "Failed to create RGFW window with an OpenGL 3.2 context."
     Just win -> R.withEventBuffer $ \evPtr -> runWindow win evPtr
@@ -171,10 +173,9 @@ runChibiAppWith opts initial view = inBoundThread $
             (pw, ph) <- R.windowSize win
             monScale <- R.windowScale win
             userScale <- readIORef (ctxScaleOverride ctx)
-            oldScale <- readIORef (ctxScale ctx)
-            let s = resolveScale userScale monScale
-            when (s /= oldScale) (setScale ctx s)
-            scale <- readIORef (ctxScale ctx)
+            oldScale <- fontScale font
+            let scale = resolveScale userScale monScale
+            when (scale /= oldScale) (setScale ctx scale)
             focused <- R.windowFocused win
             pointer <- readIORef pointerRef
             let logical :: Int -> Float
@@ -186,7 +187,7 @@ runChibiAppWith opts initial view = inBoundThread $
               (place i) {inputWindowSize = Size (logical pw) (logical ph), inputWindowFocused = focused}
           renderAndSwap renderer = do
             inp0 <- readIORef inputRef
-            scale <- readIORef (ctxScale ctx)
+            scale <- fontScale font
             (pw, ph) <- R.windowSize win
             theme1 <- readIORef (ctxTheme ctx)
             (_, dd) <- runFrame ctx inp0 view
@@ -249,8 +250,8 @@ dumpFrame renderer font dd path w h = do
         BS.concat
           [BS.take row (BS.drop ((h - 1 - y) * row) pixels) | y <- [0 .. h - 1]]
       header =
-        BS.pack (map (fromIntegral . fromEnum) ("P6\n" ++ show w ++ " " ++ show h ++ "\n255\n"))
-  (aw, ah) <- fontAtlasSize font
+        BSC.pack ("P6\n" ++ show w ++ " " ++ show h ++ "\n255\n")
+      (aw, ah) = atlasSize
   ptr <- fontAtlasPixels font
   (nz, maxX, maxY) <-
     if ptr == nullPtr
@@ -345,7 +346,7 @@ applyEvent inp = \case
   -- right, back, forward, then the rest.
   R.EventMouseButton btn down -> applyMouseButton (mouseButtonNumber (fromIntegral btn + 1)) down inp
   -- RGFW's wheel is positive up and left; the input's is down and right.
-  R.EventMouseScroll dx dy -> inp {inputScroll = let V2 sx sy = inputScroll inp in V2 (sx - dx) (sy - dy)}
+  R.EventMouseScroll dx dy -> inp {inputScroll = inputScroll inp `v2Sub` V2 dx dy}
   R.EventKeyChar ch | isPrint ch -> inp {inputChars = inputChars inp ++ [ch]}
   R.EventKeyPress k m -> key k m True
   R.EventKeyRepeat k m -> key k m True

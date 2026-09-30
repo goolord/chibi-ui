@@ -6,23 +6,17 @@ module ChibiUI.Internal.Types
   , Size (..)
   , Color (..)
   , colorRGBA
-  , colorRGB
-  , withAlpha
-  , fadeAlpha
   , colorWhite
-  , colorBlack
   , colorTransparent
-  , colorToWord32
   , colorR
   , colorG
   , colorB
   , colorA
+  , colorFloats
   , clamp
   , clamp01
   , roundHalfUp
   , validScale
-  , lerpColor
-  , ImageId (..)
   , rectContains
   , rectNonEmpty
   , rectHit
@@ -31,12 +25,11 @@ module ChibiUI.Internal.Types
   , rectsOverlap
   , rectInflate
   , rectArea
-  , v2Add
   , v2Sub
   , foldUpTo
-  , forUpTo_
   ) where
 
+import Data.Maybe (isJust)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.Word (Word8, Word32)
 
@@ -64,12 +57,6 @@ data Rect = Rect
   }
   deriving (Eq, Show)
 
--- | An image registered with the backend. It is not a native texture handle.
-newtype ImageId = ImageId
-  { unImageId :: Int
-  }
-  deriving (Eq, Ord, Show)
-
 -- | Straight-alpha colour packed as @0xRRGGBBAA@, with 8 bits per channel.
 newtype Color = Color Word32
   deriving (Eq, Show, Num)
@@ -84,31 +71,10 @@ colorRGBA r g b a =
       .|. (fromIntegral b `shiftL` 8)
       .|. fromIntegral a
 
--- | An opaque colour from red, green and blue channels.
-{-# INLINE colorRGB #-}
-colorRGB :: Word8 -> Word8 -> Word8 -> Color
-colorRGB r g b = colorRGBA r g b 255
-
--- | The colour with its alpha set to @a@, from 0 (transparent) to 1
--- (opaque); values outside that range are clamped.
-{-# INLINE withAlpha #-}
-withAlpha :: Color -> Float -> Color
-withAlpha c a = fadeAlpha c (round (255 * clamp01 a))
-
--- | Replaces the alpha channel of a color.
-fadeAlpha :: Color -> Word8 -> Color
-fadeAlpha (Color w) a = Color ((w .&. 0xFFFFFF00) .|. fromIntegral a)
-
--- | Opaque white, black, and fully transparent black.
-colorWhite, colorBlack, colorTransparent :: Color
+-- | Opaque white and fully transparent black.
+colorWhite, colorTransparent :: Color
 colorWhite = Color 0xFFFFFFFF
-colorBlack = Color 0x000000FF
 colorTransparent = Color 0
-
--- | The packed @0xRRGGBBAA@ representation.
-{-# INLINE colorToWord32 #-}
-colorToWord32 :: Color -> Word32
-colorToWord32 (Color w) = w
 
 -- | Red channel, in the range 0-255.
 {-# INLINE colorR #-}
@@ -129,6 +95,13 @@ colorB (Color w) = fromIntegral ((w `shiftR` 8) .&. 0xFF)
 {-# INLINE colorA #-}
 colorA :: Color -> Word8
 colorA (Color w) = fromIntegral (w .&. 0xFF)
+
+-- | Red, green, blue and alpha, each normalised to 0-1.
+{-# INLINE colorFloats #-}
+colorFloats :: Color -> (Float, Float, Float, Float)
+colorFloats c = (f (colorR c), f (colorG c), f (colorB c), f (colorA c))
+  where
+    f ch = fromIntegral ch / 255
 
 -- | Restrict a value to inclusive lower and upper bounds, which must be ordered.
 {-# INLINE clamp #-}
@@ -153,22 +126,6 @@ roundHalfUp r =
 -- | Whether a UI scale is usable: finite and positive.
 validScale :: Float -> Bool
 validScale s = s > 0 && not (isNaN s || isInfinite s)
-
--- | Interpolate all four packed channels. The factor is clamped to 0-1;
--- interpolation is in sRGB channel space, not linear light.
-lerpColor :: Color -> Color -> Float -> Color
-lerpColor (Color a) (Color b) t =
-  let u = clamp01 t
-      ch shift =
-        round $
-          fromIntegral ((a `shiftR` shift) .&. 0xFF) * (1 - u)
-            + fromIntegral ((b `shiftR` shift) .&. 0xFF) * u
-   in Color
-        ( (ch 24 `shiftL` 24)
-            .|. (ch 16 `shiftL` 16)
-            .|. (ch 8 `shiftL` 8)
-            .|. ch 0
-        )
 
 -- | Test a point against half-open rectangle bounds.
 {-# INLINE rectContains #-}
@@ -212,9 +169,7 @@ rectIntersect (Rect x1 y1 w1 h1) (Rect x2 y2 w2 h2) =
 -- | Whether two rectangles share positive area.
 {-# INLINE rectsOverlap #-}
 rectsOverlap :: Rect -> Rect -> Bool
-rectsOverlap a b = case rectIntersect a b of
-  Just _ -> True
-  Nothing -> False
+rectsOverlap a b = isJust (rectIntersect a b)
 
 -- | Extend every edge by the margin. A negative margin shrinks the rectangle.
 {-# INLINE rectInflate #-}
@@ -226,11 +181,6 @@ rectInflate pad (Rect x y w h) =
 {-# INLINE rectArea #-}
 rectArea :: Rect -> Float
 rectArea (Rect _ _ w h) = w * h
-
--- | Add corresponding components, for example a point and an offset.
-{-# INLINE v2Add #-}
-v2Add :: V2 -> V2 -> V2
-v2Add (V2 x1 y1) (V2 x2 y2) = V2 (x1 + x2) (y1 + y2)
 
 -- | Subtract corresponding components, for example the offset between points.
 {-# INLINE v2Sub #-}
@@ -245,8 +195,3 @@ foldUpTo n f = go 0
     go !i !acc
       | i >= n = pure acc
       | otherwise = f acc i >>= go (i + 1)
-
--- | Run @f@ on @0 .. n - 1@ in order, without allocating a range list.
-{-# INLINE forUpTo_ #-}
-forUpTo_ :: Int -> (Int -> IO ()) -> IO ()
-forUpTo_ n f = foldUpTo n (\() i -> f i) ()

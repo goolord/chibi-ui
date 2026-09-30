@@ -20,7 +20,8 @@ module ChibiUI.Internal.Font
   , fontMeasure
   , fontDrawText
   , fontAtlasPixels
-  , fontAtlasSize
+  , fontScale
+  , atlasSize
   , fontTakeDirty
   ) where
 
@@ -40,8 +41,8 @@ import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.IOArray (IOArray, newIOArray, unsafeReadIOArray, unsafeWriteIOArray)
-import ChibiUI.Internal.Draw (DrawArena, emitQuadUV)
-import ChibiUI.Internal.Types (Color, validScale)
+import ChibiUI.Internal.Draw (DrawArena, emitQuadUV, texGlyphAtlas)
+import ChibiUI.Internal.Types (Color, roundHalfUp, validScale)
 
 -- | The embedded TrueType font, from nano-ui's SDL backend: a subset of
 -- Inter (SIL OFL).
@@ -88,16 +89,15 @@ data FontState = FontState
   -- ^ The space glyph's advance at the raster size, in device pixels.
   , fsLow :: !(IOArray Int GlyphDev)
   -- ^ Rasterized glyphs below 'lowGlyphs' by code point, else 'missGlyph'.
+  , fsHigh :: !(IORef (IntMap GlyphDev))
+  -- ^ Rasterized glyphs from 'lowGlyphs' up, by code point.
   }
 
--- | The loaded font: its bytes for scale rebuilds, the state at the
--- current scale, and the glyph cache for the current raster size.
+-- | The loaded font: its bytes for scale rebuilds, and the state at the
+-- current scale.
 data Font = Font
   { fBytes :: !BS.ByteString
   , fState :: !(IORef FontState)
-  , fGlyphs :: !(IORef (IntMap GlyphDev))
-  -- ^ Rasterized glyphs from 'lowGlyphs' up, by code point, valid for the
-  -- current handle and raster size only.
   }
 
 -- | Code points cached in the direct table: Latin-1.
@@ -148,15 +148,14 @@ peekGlyph p = do
 -- caller may release them.
 newFont :: ByteString -> IO Font
 newFont bytes = do
-  st <- newIORef . FontState nullPtr 0 0 0 0 0 =<< newIOArray (0, lowGlyphs - 1) missGlyph
-  glyphs <- newIORef IM.empty
-  let f = Font {fBytes = bytes, fState = st, fGlyphs = glyphs}
+  st <- newIORef =<< FontState nullPtr 0 0 0 0 0 <$> newIOArray (0, lowGlyphs - 1) missGlyph <*> newIORef IM.empty
+  let f = Font {fBytes = bytes, fState = st}
   fontSetScale f 1
   pure f
 
 -- | (Re)load the C font at a UI scale. The raster size is the line height
 -- in device pixels; RFont caches glyphs per size, so a scale change starts
--- a fresh font and atlas, and the Haskell-side glyph cache with them.
+-- a fresh font and atlas, and the Haskell-side glyph caches with them.
 fontSetScale :: Font -> Float -> IO ()
 fontSetScale f scale = do
   let scale' = if validScale scale then scale else 1
@@ -169,6 +168,7 @@ fontSetScale f scale = do
         c_init (castPtr p) (fromIntegral len) (fromIntegral sizeD) (fromIntegral atlasWidth) (fromIntegral atlasHeight)
     when (h == nullPtr) $ fail "chibi-ui: font failed to load"
     low <- newIOArray (0, lowGlyphs - 1) missGlyph
+    high <- newIORef IM.empty
     (fh, ds, sa) <- allocaBytes 12 $ \m -> do
       c_metrics h m (plusPtr m 4) (plusPtr m 8)
       (,,) <$> (peekByteOff m 0 :: IO Float) <*> (peekByteOff m 4 :: IO Float) <*> (peekByteOff m 8 :: IO Float)
@@ -184,8 +184,12 @@ fontSetScale f scale = do
           -- scaled by the raster size.
         , fsSpaceAdv = if fh > 0 then sa * fromIntegral sizeD / fh else 0
         , fsLow = low
+        , fsHigh = high
         }
-    writeIORef (fGlyphs f) IM.empty
+
+-- | Device pixels per logical pixel the font rasterizes at.
+fontScale :: Font -> IO Float
+fontScale f = fsScale <$> readIORef (fState f)
 
 -- | Free the C font. The record is dead afterwards.
 fontFree :: Font -> IO ()
@@ -209,7 +213,7 @@ fontMeasure f t = do
               | cp == cpSpace || cp == cpTab -> go (acc + fsSpaceAdv st) (i + d)
               | cp == cpLF || cp == cpCR -> go acc (i + d)
               | otherwise -> do
-                  g <- glyph f st cp
+                  g <- glyph st cp
                   go (acc + max 0 (gdAdvance g)) (i + d)
   dev <- go 0 0
   pure (dev * recip (fsScale st))
@@ -238,22 +242,22 @@ charAt t !i = case TU.iter t i of
 -- | The glyph for a code point, rasterized and cached on a miss. Without
 -- a C font it stays 'missGlyph', which advances and draws nothing.
 {-# INLINE glyph #-}
-glyph :: Font -> FontState -> Int -> IO GlyphDev
-glyph f st cp = do
+glyph :: FontState -> Int -> IO GlyphDev
+glyph st cp = do
   g <-
     if cp < lowGlyphs
       then unsafeReadIOArray (fsLow st) cp
-      else IM.findWithDefault missGlyph cp <$> readIORef (fGlyphs f)
-  if gdAdvance g >= 0 || fsHandle st == nullPtr then pure g else rasterize f st cp
+      else IM.findWithDefault missGlyph cp <$> readIORef (fsHigh st)
+  if gdAdvance g >= 0 || fsHandle st == nullPtr then pure g else rasterize st cp
 
-rasterize :: Font -> FontState -> Int -> IO GlyphDev
-rasterize f st cp = do
+rasterize :: FontState -> Int -> IO GlyphDev
+rasterize st cp = do
   g <- allocaBytes glyphBytes $ \p -> do
     c_glyph (fsHandle st) (fromIntegral cp) (fromIntegral (fsSize st)) p
     peekGlyph p
   if cp < lowGlyphs
     then unsafeWriteIOArray (fsLow st) cp g
-    else modifyIORef' (fGlyphs f) (IM.insert cp g)
+    else modifyIORef' (fsHigh st) (IM.insert cp g)
   pure g
 
 -- | Draw one line of text as glyph quads into the draw arena, with the
@@ -279,7 +283,7 @@ fontDrawText f arena penX penY col t = do
           if fh > 0
             then fromIntegral sizeD * (fh + ds) / fh
             else fromIntegral sizeD
-        baseY = fromIntegral (round (penY * scale + baseline) :: Int)
+        baseY = fromIntegral (roundHalfUp (penY * scale + baseline))
         invScale = recip scale
         atlasW = fromIntegral atlasWidth :: Float
         atlasH = fromIntegral atlasHeight :: Float
@@ -291,11 +295,12 @@ fontDrawText f arena penX penY col t = do
                 | cp == cpLF || cp == cpCR -> go pen (i + d)
                 | cp == cpSpace || cp == cpTab -> go (pen + sa) (i + d)
                 | otherwise -> do
-                    g <- glyph f st cp
+                    g <- glyph st cp
                     when (gdW g > 0 && gdH g > 0) $
-                      let px = fromIntegral (round pen :: Int)
+                      let px = fromIntegral (roundHalfUp pen)
                        in emitQuadUV
                             arena
+                            texGlyphAtlas
                             ((px + gdX1 g) * invScale)
                             ((baseY + gdY1 g) * invScale)
                             ((px + gdX1 g + gdW g) * invScale)
@@ -315,9 +320,9 @@ fontAtlasPixels f = do
   h <- fsHandle <$> readIORef (fState f)
   if h /= nullPtr then c_atlasPixels h else pure nullPtr
 
--- | The atlas dimensions, in texels.
-fontAtlasSize :: Font -> IO (Int, Int)
-fontAtlasSize _ = pure (atlasWidth, atlasHeight)
+-- | The atlas dimensions, in texels, the same for every font.
+atlasSize :: (Int, Int)
+atlasSize = (atlasWidth, atlasHeight)
 
 -- | Whether any glyph has been rasterized since the last call, so the
 -- backend should re-upload the atlas.
