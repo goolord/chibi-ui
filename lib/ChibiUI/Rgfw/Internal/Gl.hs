@@ -62,6 +62,9 @@ foreign import ccall unsafe "chibi_ui_gl_read_retained"
 foreign import ccall unsafe "chibi_ui_gl_upload_geometry"
   c_uploadGeometry :: Ptr ChibiUiGl -> Ptr Word8 -> Int32 -> IO ()
 
+foreign import ccall unsafe "chibi_ui_gl_upload_quads"
+  c_uploadQuads :: Ptr ChibiUiGl -> Ptr Word8 -> Word32 -> Word32 -> IO ()
+
 foreign import ccall unsafe "chibi_ui_gl_draw_geometry"
   c_drawGeometry :: Ptr ChibiUiGl -> Int32 -> Int32 -> Int32 -> Int32 -> Word32 -> Word32 -> Int32 -> IO ()
 
@@ -77,6 +80,8 @@ data GlRenderer = GlRenderer
   -- ^ Whether the atlas texture exists yet.
   , glImages :: !(IORef (IM.IntMap Int))
   -- ^ Per image id, the version last uploaded.
+  , glVertexCount :: !(IORef Int)
+  -- ^ The vertex count last uploaded; -1 before the first upload.
   , glFrameSize :: !(IORef (Int, Int))
   -- ^ The framebuffer size of the last drawn frame. A size change
   -- recreates the retained texture, discarding its pixels, so it forces a
@@ -89,7 +94,7 @@ newGlRenderer = do
   h <- c_create
   when (h == nullPtr) $
     fail "chibi-ui: OpenGL renderer setup failed (needs an OpenGL 3.2 core context)"
-  GlRenderer h <$> newIORef False <*> newIORef IM.empty <*> newIORef (0, 0)
+  GlRenderer h <$> newIORef False <*> newIORef IM.empty <*> newIORef (-1) <*> newIORef (0, 0)
 
 -- | Release the GPU objects (the context must still be current).
 freeGlRenderer :: GlRenderer -> IO ()
@@ -100,9 +105,11 @@ freeGlRenderer r = c_destroy (glHandle r)
 -- pixel and must match the scale the font rasterizes at. The @damage@ the
 -- caller tracked against the last frame decides the work: nothing, the
 -- damaged rectangles, or everything. New texture contents (atlas glyphs or
--- image versions) and a framebuffer size change repaint in full.
-renderFrameGl :: GlRenderer -> Font -> IM.IntMap ImageEntry -> Float -> Int -> Int -> Color -> DrawData -> Damage -> IO ()
-renderFrameGl r font images !scale !fbW !fbH bg drawData damage = do
+-- image versions) and a framebuffer size change repaint in full. @changed@
+-- lists the quads that differ from the last frame drawn, when the quad
+-- count held ('snapshotChangedQuads'); only those are uploaded.
+renderFrameGl :: GlRenderer -> Font -> IM.IntMap ImageEntry -> Float -> Int -> Int -> Color -> DrawData -> Damage -> Maybe [Int] -> IO ()
+renderFrameGl r font images !scale !fbW !fbH bg drawData damage changed = do
   let !h = glHandle r
       (!bgR, !bgG, !bgB, _) = colorFloats bg
   atlasChanged <- syncFontAtlasGl r font
@@ -114,19 +121,31 @@ renderFrameGl r font images !scale !fbW !fbH bg drawData damage = do
     else do
       began <- c_begin h (fromIntegral fbW) (fromIntegral fbH) scale bgR bgG bgB (if full then 1 else 0)
       when (began == 0) $ fail "chibi-ui: retained framebuffer setup failed"
-      uploadGeometry h drawData
+      uploadGeometry r drawData changed
       case damage of
         DamageRects rs | not full -> drawDamaged h scale fbW fbH drawData rs bgR bgG bgB
         _ -> mapM_ (drawCmd h (0, 0, fbW, fbH)) (drawCommands drawData)
       c_present h
   writeIORef (glFrameSize r) (fbW, fbH)
 
--- | Hand the frame's vertices to the GPU. Partial and full frames alike
--- upload everything; the draws below pick what to rasterize.
-uploadGeometry :: Ptr ChibiUiGl -> DrawData -> IO ()
-uploadGeometry h drawData =
-  withForeignPtr (drawVertices drawData) $ \vp ->
-    c_uploadGeometry h vp (fromIntegral (drawVertexCount drawData))
+-- | Hand the frame's vertices to the GPU: only the changed quads, in runs,
+-- when the buffer holds the last frame at the same count, else everything.
+uploadGeometry :: GlRenderer -> DrawData -> Maybe [Int] -> IO ()
+uploadGeometry r drawData changed = do
+  let n = drawVertexCount drawData
+  uploaded <- readIORef (glVertexCount r)
+  withForeignPtr (drawVertices drawData) $ \vp -> case changed of
+    Just qs | n == uploaded ->
+      forM_ (quadRuns qs) $ \(q, k) -> c_uploadQuads (glHandle r) vp (fromIntegral q) (fromIntegral k)
+    _ -> c_uploadGeometry (glHandle r) vp (fromIntegral n)
+  writeIORef (glVertexCount r) n
+
+-- | Ascending quad indices as runs of @(first, count)@.
+quadRuns :: [Int] -> [(Int, Int)]
+quadRuns = foldr step []
+  where
+    step q ((q', k) : rest) | q' == q + 1 = (q, k + 1) : rest
+    step q runs = (q, 1) : runs
 
 -- | Draw one command scissored to a physical-pixel box. Quads arrive
 -- already cut to their clips, so the scissor only bounds damage repaints.

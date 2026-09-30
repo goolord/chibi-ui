@@ -2,12 +2,12 @@
 -- and the previous one, as a handful of rectangles in logical pixels.
 --
 -- The comparison is per quad, not per widget. Quads are emitted in a
--- canonical layout (four 32-byte vertices, six indices, in order), so the
--- k-th quad of one frame lines up with the k-th quad of the next; inserted
--- or removed content shifts the tail, which simply reads as more damage.
--- A frame whose vertices, quad count, and batch texture sequence all
--- match the previous one is damage-free: it renders to the same pixels, so
--- the backend can skip it and idle. A few changed quads become damage
+-- canonical layout (four 32-byte vertices, in order), so the k-th quad of
+-- one frame lines up with the k-th quad of the next; inserted or removed
+-- content shifts the tail, which simply reads as more damage. A frame
+-- whose vertices, quad count, and batch texture sequence all match the
+-- previous one is damage-free: it renders to the same pixels, so the
+-- backend can skip it and idle. A few changed quads become damage
 -- rectangles; anything bigger or structurally ambiguous is a full frame.
 module ChibiUI.Internal.Damage
   ( Damage (..)
@@ -15,16 +15,17 @@ module ChibiUI.Internal.Damage
   , takeSnapshot
   , frameDamage
   , trackFrame
+  , snapshotChangedQuads
   , commandQuadBounds
   ) where
 
+import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Unsafe as BSU
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CSize (..))
-import Foreign.ForeignPtr (withForeignPtr)
-import Foreign.Ptr (Ptr, castPtr, plusPtr)
+import Foreign.ForeignPtr (ForeignPtr, mallocForeignPtrBytes, withForeignPtr)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, vertexSize)
 import ChibiUI.Internal.Types
@@ -55,20 +56,24 @@ data Damage
 
 -- | One frame's copied geometry, for diffing against the next frame. The
 -- arena is reset and reused every frame, so a snapshot owns its bytes.
+-- 'trackFrame' reuses the buffer of the snapshot it replaces, so a
+-- snapshot read out of its reference is valid until the next track.
 data FrameSnapshot = FrameSnapshot
-  { snapVertices :: !BS.ByteString
-  -- ^ The used prefix of the vertex buffer: quad @k@ lives at byte
-    -- @k * 4 * vertexSize@.
+  { snapBuffer :: !(ForeignPtr Word8)
+  -- ^ The used prefix of the frame's vertex buffer, in a buffer of
+    -- 'snapCapacity' bytes: quad @k@ lives at byte @k * quadBytes@.
+  , snapCapacity :: !Int
+  , snapBytes :: !Int
   , snapTextures :: ![Int]
   -- ^ Each batch's texture, in order. Index ranges are not kept: they
     -- shift when quads are inserted or removed, which the quad diff
     -- already sees; a texture changing in place can repaint different
     -- pixels over identical geometry and forces a full frame.
+  , snapChanged :: !(Maybe [Int])
+  -- ^ The quads that changed from the frame tracked before this one, in
+    -- order, over an unchanged quad count; 'Nothing' when unknown or when
+    -- the count changed.
   }
-
--- | Quads a snapshot holds.
-snapQuadCount :: FrameSnapshot -> Int
-snapQuadCount snap = BS.length (snapVertices snap) `div` quadBytes
 
 -- | Quads whose diff alone is worth reporting before falling back to a
 -- full frame.
@@ -85,84 +90,104 @@ damageFullFrac = 0.7
 
 -- | Copy a frame's geometry into an owned snapshot.
 takeSnapshot :: DrawData -> IO FrameSnapshot
-takeSnapshot dd = do
-  verts <- copyVertices dd
+takeSnapshot dd = copyInto Nothing dd Nothing
+
+-- | Copy a frame's geometry into a snapshot, reusing an old snapshot's
+-- buffer when it is large enough.
+copyInto :: Maybe FrameSnapshot -> DrawData -> Maybe [Int] -> IO FrameSnapshot
+copyInto old dd changed = do
+  let len = drawVertexCount dd * vertexSize
+  (buf, cap) <- case old of
+    Just snap | snapCapacity snap >= len -> pure (snapBuffer snap, snapCapacity snap)
+    _ -> do
+      let cap = max len (maybe 0 ((* 2) . snapCapacity) old)
+      fp <- mallocForeignPtrBytes (max 1 cap)
+      pure (fp, cap)
+  withForeignPtr buf $ \dst ->
+    withForeignPtr (drawVertices dd) $ \src -> copyBytes dst src len
   pure
     FrameSnapshot
-      { snapVertices = verts
+      { snapBuffer = buf
+      , snapCapacity = cap
+      , snapBytes = len
       , snapTextures = map cmdTextureId (drawCommands dd)
+      , snapChanged = changed
       }
+
+-- | The quads that changed from the frame tracked before the snapshot's,
+-- when the quad count stayed the same: a renderer that kept the earlier
+-- frame's vertices re-uploads only these. 'Nothing' means everything.
+snapshotChangedQuads :: FrameSnapshot -> Maybe [Int]
+snapshotChangedQuads = snapChanged
 
 -- | Diff a snapshot against the frame just drawn. Texture contents are
 -- assumed unchanged; the backend forces a full frame when the atlas or an
 -- image uploads. The frame is compared against the arena in place, so the
 -- diff itself copies nothing.
 frameDamage :: FrameSnapshot -> DrawData -> Size -> IO Damage
-frameDamage snap dd window = do
-  same <- vertexBytesEq (snapVertices snap) dd
-  let old = snapTextures snap
-      new = map cmdTextureId (drawCommands dd)
-  if same && old == new
-    then pure DamageNone
-    else
-      -- The same batch structure over different textures.
-      if old /= new && length old == length new
-        then pure DamageFull
-        else withForeignPtr (drawVertices dd) $ \vp -> do
-          let oldN = snapQuadCount snap
-              newN = drawVertexCount dd `div` 4
-          rects <- changedQuadRects (snapVertices snap) vp (min oldN newN) oldN newN
-          pure (maybe DamageFull (mergeDamage window) rects)
+frameDamage snap dd window = fst <$> diffFrame snap dd window
 
--- | Whether the frame's used vertex prefix equals the snapshot's bytes,
--- compared in place: the arena's buffer against the snapshot's copy.
-vertexBytesEq :: BS.ByteString -> DrawData -> IO Bool
-vertexBytesEq snap dd = do
-  let len = drawVertexCount dd * vertexSize
-  if len /= BS.length snap
-    then pure False
-    else
-      withForeignPtr (drawVertices dd) $ \vp ->
-        BSU.unsafeUseAsCStringLen snap $ \(sp, _) ->
-          (== 0) <$> c_memcmp vp (castPtr sp) (fromIntegral len)
-
--- | Copy the frame's used vertex prefix into an owned bytestring.
-copyVertices :: DrawData -> IO BS.ByteString
-copyVertices dd =
-  withForeignPtr (drawVertices dd) $ \p ->
-    BS.packCStringLen (castPtr p, drawVertexCount dd * vertexSize)
+-- | The damage, and the changed quads when the quad count held.
+diffFrame :: FrameSnapshot -> DrawData -> Size -> IO (Damage, Maybe [Int])
+diffFrame snap dd window =
+  withForeignPtr (snapBuffer snap) $ \old ->
+    withForeignPtr (drawVertices dd) $ \new -> do
+      let len = drawVertexCount dd * vertexSize
+          oldTex = snapTextures snap
+          newTex = map cmdTextureId (drawCommands dd)
+      same <-
+        if len /= snapBytes snap
+          then pure False
+          else (== 0) <$> c_memcmp old new (fromIntegral len)
+      if same && oldTex == newTex
+        then pure (DamageNone, Just [])
+        else
+          -- The same batch structure over different textures.
+          if oldTex /= newTex && length oldTex == length newTex
+            then pure (DamageFull, Nothing)
+            else do
+              let oldN = snapBytes snap `div` quadBytes
+                  newN = drawVertexCount dd `div` 4
+              diff <- changedQuads old new (min oldN newN) oldN newN
+              pure $ case diff of
+                Nothing -> (DamageFull, Nothing)
+                Just (changed, rects) ->
+                  (mergeDamage window rects, if oldN == newN then Just changed else Nothing)
 
 -- | Diff and update the snapshot a backend keeps of the frame on screen.
--- A damage-free frame leaves the stored snapshot in place: it still
--- describes the current frame exactly.
+-- A damage-free frame keeps the stored bytes: they still describe the
+-- current frame exactly.
 trackFrame :: IORef (Maybe FrameSnapshot) -> Size -> DrawData -> IO Damage
 trackFrame ref window dd = do
   prev <- readIORef ref
-  damage <- maybe (pure DamageFull) (\snap -> frameDamage snap dd window) prev
-  case damage of
-    DamageNone -> pure ()
-    _ -> takeSnapshot dd >>= writeIORef ref . Just
-  pure damage
+  case prev of
+    Nothing -> do
+      writeIORef ref . Just =<< copyInto Nothing dd Nothing
+      pure DamageFull
+    Just snap -> do
+      (damage, changed) <- diffFrame snap dd window
+      if damage == DamageNone
+        then when (snapChanged snap /= Just []) (writeIORef ref (Just snap {snapChanged = Just []}))
+        else writeIORef ref . Just =<< copyInto prev dd changed
+      pure damage
 
--- | Bounds of every quad that differs between the snapshot's vertices and
--- the frame's at @new@ over @[0, n)@, plus the tail quads present in only
--- one of them, from both sides. 'Nothing' when there is too much to track.
-changedQuadRects :: BS.ByteString -> Ptr Word8 -> Int -> Int -> Int -> IO (Maybe [Rect])
-changedQuadRects old new n oldN newN =
-  BSU.unsafeUseAsCString old $ \op -> do
-    let oldP = castPtr op
-    diff <- diffQuads oldP new n
-    case diff of
-      Nothing -> pure Nothing
-      Just changed
-        | length changed + (oldN - n) + (newN - n) > maxChangedQuads -> pure Nothing
-        | otherwise -> do
-            let touched = changed ++ [n .. oldN - 1] ++ [n .. newN - 1]
-            -- Both sides of every changed quad: the old area may need
-            -- clearing even where the new frame draws nothing.
-            oldSide <- mapM (quadAtPtr oldP) [k | k <- touched, k < oldN]
-            newSide <- mapM (quadAtPtr new) [k | k <- touched, k < newN]
-            pure (Just (filter rectNonEmpty (oldSide ++ newSide)))
+-- | The quads that differ between the old vertices and the new over
+-- @[0, n)@, with the bounds of every quad touched: those, plus the tail
+-- quads present in only one of them, from both sides. 'Nothing' when there
+-- is too much to track.
+changedQuads :: Ptr Word8 -> Ptr Word8 -> Int -> Int -> Int -> IO (Maybe ([Int], [Rect]))
+changedQuads old new n oldN newN = do
+  diff <- diffQuads old new n
+  case diff of
+    Just changed
+      | length changed + (oldN - n) + (newN - n) <= maxChangedQuads -> do
+          let touched = changed ++ [n .. oldN - 1] ++ [n .. newN - 1]
+          -- Both sides of every changed quad: the old area may need
+          -- clearing even where the new frame draws nothing.
+          oldSide <- mapM (quadAtPtr old) [k | k <- touched, k < oldN]
+          newSide <- mapM (quadAtPtr new) [k | k <- touched, k < newN]
+          pure (Just (changed, filter rectNonEmpty (oldSide ++ newSide)))
+    _ -> pure Nothing
 
 -- | Indices of the quads over @[0, n)@ whose bytes differ, or 'Nothing'
 -- past the tracking budget.

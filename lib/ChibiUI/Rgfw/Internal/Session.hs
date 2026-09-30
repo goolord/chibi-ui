@@ -40,7 +40,7 @@ import ChibiUI.Internal.Context
   , setTheme
   , withClipboard
   )
-import ChibiUI.Internal.Damage (trackFrame)
+import ChibiUI.Internal.Damage (snapshotChangedQuads, trackFrame)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
@@ -193,7 +193,8 @@ runChibiApp opts initial view = inBoundThread $
             (_, dd) <- runFrame ctx inp0 view
             images <- readIORef (ctxImages ctx)
             damage <- trackFrame snapRef (inputWindowSize inp0) dd
-            renderFrameGl renderer font images scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage
+            changed <- (>>= snapshotChangedQuads) <$> readIORef snapRef
+            renderFrameGl renderer font images scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage changed
             R.swapBuffersGL win
             -- Clear one-shot events and stamp the timing of the frame that
             -- just ran onto the next one.

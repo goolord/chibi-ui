@@ -117,6 +117,7 @@ typedef intptr_t GLsizeiptr;
   X(void, GenBuffers, (GLsizei, GLuint*))                                                           \
   X(void, BindBuffer, (GLenum, GLuint))                                                             \
   X(void, BufferData, (GLenum, GLsizeiptr, const void*, GLenum))                                    \
+  X(void, BufferSubData, (GLenum, GLsizeiptr, GLsizeiptr, const void*))                             \
   X(void, DeleteBuffers, (GLsizei, const GLuint*))                                                  \
   X(void, EnableVertexAttribArray, (GLuint))                                                        \
   X(void, VertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void*))            \
@@ -526,6 +527,18 @@ void chibi_ui_gl_upload_geometry(chibi_ui_gl* r, const void* vertices, int32_t v
                  vertexCount > 0 ? vertices : NULL, GL_STREAM_DRAW);
   if (!ngl_ensure_indices(r, (uint32_t)vertexCount / 4))
     fprintf(stderr, "chibi-ui: out of memory for the index buffer\n");
+}
+
+/* Replace quads [firstQuad, firstQuad + quadCount) of the uploaded
+ * vertices, which must already hold that many quads, from the frame's
+ * vertex buffer. */
+void chibi_ui_gl_upload_quads(chibi_ui_gl* r, const uint8_t* vertices, uint32_t firstQuad,
+                              uint32_t quadCount) {
+  ngl_api* gl = &r->gl;
+  GLsizeiptr offset = (GLsizeiptr)firstQuad * 4 * NGL_VERTEX_BYTES;
+  gl->BindBuffer(GL_ARRAY_BUFFER, r->geomVbo);
+  gl->BufferSubData(GL_ARRAY_BUFFER, offset, (GLsizeiptr)quadCount * 4 * NGL_VERTEX_BYTES,
+                    vertices + offset);
 }
 
 /* Draw one command's quads. The clip is in top-left physical pixels,

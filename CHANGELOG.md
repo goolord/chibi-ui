@@ -10,6 +10,11 @@
   `DrawCmd` counts quads (`cmdFirstQuad`, `cmdQuadCount`), and `DrawData`
   loses `drawIndices` and `drawIndexCount`.
 
+- `trackFrame` copies each frame into the snapshot it replaces instead
+  of allocating a new one, and records which quads changed
+  (`snapshotChangedQuads`); the RGFW renderer re-uploads only those when
+  the quad count holds.
+
 - App keys (`keyPressed`, `keyHeld`, `shortcut`, `primaryShortcut`) are
   suppressed only while a text field is focused, not while any widget is:
   a clicked button no longer swallows Ctrl+S. Tables take focus and Tab,
