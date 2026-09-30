@@ -1,9 +1,10 @@
 -- | OpenGL presentation for the RGFW host, adapted from nano-ui-rgfw.
 --
 -- Geometry goes to the GPU straight from the frame's 'DrawData' buffers,
--- one scissored draw per command; commands whose texture id names an image
+-- one draw per texture run; commands whose texture id names an image
 -- sample the texture 'uploadImagesGl' maintains, and text commands sample
--- the coverage atlas the font rasterizes into, synced by 'renderFrameGl'.
+-- the coverage atlas the font rasterizes into, both synced by
+-- 'renderFrameGl'.
 --
 -- Frames draw into a retained framebuffer and a present copies it to the
 -- window. The frame's 'Damage' decides how much of that buffer to touch:
@@ -15,7 +16,6 @@ module ChibiUI.Rgfw.Internal.Gl
   , newGlRenderer
   , freeGlRenderer
   , renderFrameGl
-  , uploadImagesGl
   , readRetainedPixels
   ) where
 
@@ -100,16 +100,16 @@ freeGlRenderer r = c_destroy (glHandle r)
 -- back buffer; the caller swaps. @scale@ is device pixels per logical
 -- pixel and must match the scale the font rasterizes at. The @damage@ the
 -- caller tracked against the last frame decides the work: nothing, the
--- damaged rectangles, or everything. An atlas upload or a framebuffer size
--- change upgrades the damage to a full frame.
-renderFrameGl :: GlRenderer -> Font -> Float -> Int -> Int -> Color -> DrawData -> Damage -> IO ()
-renderFrameGl r font !scale !fbW !fbH bg drawData damage = do
+-- damaged rectangles, or everything. New texture contents (atlas glyphs or
+-- image versions) and a framebuffer size change repaint in full.
+renderFrameGl :: GlRenderer -> Font -> IM.IntMap ImageEntry -> Float -> Int -> Int -> Color -> DrawData -> Damage -> IO ()
+renderFrameGl r font images !scale !fbW !fbH bg drawData damage = do
   let !h = glHandle r
       (!bgR, !bgG, !bgB, _) = colorFloats bg
   atlasChanged <- syncFontAtlasGl r font
+  imagesChanged <- uploadImagesGl r images
   lastSize <- readIORef (glFrameSize r)
-  let !sizeChanged = lastSize /= (fbW, fbH)
-      !full = atlasChanged || sizeChanged || damage == DamageFull
+  let !full = atlasChanged || imagesChanged || lastSize /= (fbW, fbH) || damage == DamageFull
   if damage == DamageNone && not full
     then c_present h
     else do
@@ -117,8 +117,8 @@ renderFrameGl r font !scale !fbW !fbH bg drawData damage = do
       when (began == 0) $ fail "chibi-ui: retained framebuffer setup failed"
       uploadGeometry h drawData
       case damage of
-        DamageRects rs | not full -> drawDamagedCommands h scale fbW fbH drawData rs bgR bgG bgB
-        _ -> drawAllCommands h scale fbW fbH drawData
+        DamageRects rs | not full -> drawDamaged h scale fbW fbH drawData rs bgR bgG bgB
+        _ -> mapM_ (drawCmd h (0, 0, fbW, fbH)) (drawCommands drawData)
       c_present h
   writeIORef (glFrameSize r) (fbW, fbH)
 
@@ -135,47 +135,31 @@ uploadGeometry h drawData =
         ip
         (fromIntegral (drawIndexCount drawData))
 
--- | Draw one command scissored to a logical rectangle, when the rectangle
--- covers any of the framebuffer.
-drawCmdIn :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawCmd -> Rect -> IO ()
-drawCmdIn h !scale !fbW !fbH cmd box =
-  case physClip scale fbW fbH box of
-    Nothing -> pure ()
-    Just (x0, y0, x1, y1) ->
-      c_drawGeometry
-        h
-        (fromIntegral x0)
-        (fromIntegral y0)
-        (fromIntegral x1)
-        (fromIntegral y1)
-        (cmdIndexOffset cmd)
-        (cmdIndexCount cmd)
-        (fromIntegral (cmdTextureId cmd))
+-- | Draw one command scissored to a physical-pixel box. Quads arrive
+-- already cut to their clips, so the scissor only bounds damage repaints.
+drawCmd :: Ptr ChibiUiGl -> (Int, Int, Int, Int) -> DrawCmd -> IO ()
+drawCmd h (x0, y0, x1, y1) cmd =
+  when (cmdIndexCount cmd >= 3) $
+    c_drawGeometry
+      h
+      (fromIntegral x0)
+      (fromIntegral y0)
+      (fromIntegral x1)
+      (fromIntegral y1)
+      (cmdIndexOffset cmd)
+      (cmdIndexCount cmd)
+      (fromIntegral (cmdTextureId cmd))
 
--- | Every command under its own clip: the whole-frame repaint.
-drawAllCommands :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> IO ()
-drawAllCommands h !scale !fbW !fbH drawData =
-  forM_ (drawCommands drawData) $ \cmd ->
-    when (cmdIndexCount cmd >= 3) $
-      drawCmdIn h scale fbW fbH cmd (cmdClipRect cmd)
-
--- | Clear the damaged rectangles, then redraw each command that intersects
--- one, scissored to the overlap, into the still-retained pixels around it.
--- A command's quad bounds are walked only when its clip meets some damage.
-drawDamagedCommands :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> [Rect] -> Float -> Float -> Float -> IO ()
-drawDamagedCommands h !scale !fbW !fbH drawData rects bgR bgG bgB = do
-  forM_ rects $ \dmg ->
-    case physClip scale fbW fbH dmg of
-      Nothing -> pure ()
-      Just (x0, y0, x1, y1) ->
-        c_clearRegion h (fromIntegral x0) (fromIntegral y0) (fromIntegral x1) (fromIntegral y1) bgR bgG bgB
-  forM_ (drawCommands drawData) $ \cmd ->
-    when (cmdIndexCount cmd >= 3) $ do
-      let hits = [(dmg, box) | dmg <- rects, Just box <- [rectIntersect (cmdClipRect cmd) dmg]]
-      when (not (null hits)) $ do
-        bounds <- commandQuadBounds drawData cmd
-        forM_ hits $ \(dmg, box) ->
-          when (rectsOverlap bounds dmg) (drawCmdIn h scale fbW fbH cmd box)
+-- | Clear the damaged rectangles, then redraw each command whose quads
+-- meet one, scissored to it, into the still-retained pixels around it.
+drawDamaged :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> [Rect] -> Float -> Float -> Float -> IO ()
+drawDamaged h !scale !fbW !fbH drawData rects bgR bgG bgB = do
+  let boxes = [(dmg, box) | dmg <- rects, Just box <- [physClip scale fbW fbH dmg]]
+  forM_ boxes $ \(_, (x0, y0, x1, y1)) ->
+    c_clearRegion h (fromIntegral x0) (fromIntegral y0) (fromIntegral x1) (fromIntegral y1) bgR bgG bgB
+  forM_ (drawCommands drawData) $ \cmd -> do
+    bounds <- commandQuadBounds drawData cmd
+    forM_ boxes $ \(dmg, box) -> when (rectsOverlap bounds dmg) (drawCmd h box cmd)
 
 -- | The retained frame's pixels, RGBA rows bottom row first. For debugging
 -- what a frame drew.
@@ -201,8 +185,7 @@ syncFontAtlasGl r font = do
 
 -- | Upload registered images whose version changed since the last sync.
 -- Reports whether any texture changed, so callers can repaint in full: the
--- same quads sample different pixels. Call before 'renderFrameGl' with the
--- GL context current.
+-- same quads sample different pixels.
 uploadImagesGl :: GlRenderer -> IM.IntMap ImageEntry -> IO Bool
 uploadImagesGl r images = do
   uploaded <- readIORef (glImages r)

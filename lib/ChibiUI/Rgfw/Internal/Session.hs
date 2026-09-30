@@ -1,10 +1,9 @@
 -- | The RGFW window session: options, the runner, and translation of RGFW
 -- events into 'Input', adapted from nano-ui-rgfw.
 --
--- The loop is simple: wait for events (or until the caret's next blink
--- while a widget is focused, or a short timeout when a view asked for a
--- frame), fold
--- the event batch into one 'Input', run the view, and render. Rendering
+-- The loop is simple: wait for events (or a short timeout when a view
+-- asked for a frame, or until the time a view asked for one at), fold the
+-- event batch into one 'Input', run the view, and render. Rendering
 -- carries rudimentary damage tracking: the frame's draw list is diffed
 -- against the last one, so a frame that changed nothing presents without
 -- drawing and one that changed a little repaints only those rectangles.
@@ -14,11 +13,6 @@ module ChibiUI.Rgfw.Internal.Session
   , WindowSettings (..)
   , defaultWindowSettings
   , runChibiAppWith
-  -- * Input translation
-  , RgfwEvent (..)
-  , decodeRgfwEvents
-  , applyRgfwEvent
-  , mapRgfwCursor
   ) where
 
 import Control.Concurrent (rtsSupportsBoundThreads, runInBoundThread)
@@ -27,13 +21,13 @@ import Control.Monad (forM_, unless, void, when)
 import Data.Bits ((.&.), (.|.))
 import Data.Char (chr, isPrint, toLower)
 import Data.IORef
-import Data.Maybe (isJust, listToMaybe, mapMaybe)
+import Data.Maybe (isJust, listToMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 ()
 import qualified Data.Text as T
 import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (withForeignPtr)
-import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
+import Foreign.Ptr (castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Clock (getMonotonicTime)
 import qualified System.Environment
@@ -41,20 +35,19 @@ import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), texGlyphAtlas, vertex
 import ChibiUI.Internal.Context
   ( Context (..)
   , newContext
-  , noWidget
   , setFont
   , setScale
   , setTheme
   , withClipboard
   )
-import ChibiUI.Internal.Damage (Damage (..), trackFrame)
+import ChibiUI.Internal.Damage (trackFrame)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
 import ChibiUI.Internal.Font (Font, fontAtlasPixels, fontAtlasSize, fontFree, newFont)
 import ChibiUI.Internal.Style (Theme, defaultTheme, themeWindow)
 import ChibiUI.Internal.Types (Size (..), V2 (..), validScale)
-import ChibiUI.Rgfw.Internal.Gl (GlRenderer, freeGlRenderer, newGlRenderer, readRetainedPixels, renderFrameGl, uploadImagesGl)
+import ChibiUI.Rgfw.Internal.Gl (GlRenderer, freeGlRenderer, newGlRenderer, readRetainedPixels, renderFrameGl)
 import qualified RGFW as R
 
 -- | Window settings for the RGFW runner. Sizes are in logical pixels.
@@ -147,6 +140,9 @@ runChibiAppWith opts initial view = inBoundThread $
       -- Persistent input: each frame starts from the last, with one-shot
       -- events cleared.
       inputRef <- newIORef emptyInput
+      -- The pointer in device pixels, or 'Nothing' outside the window: it
+      -- becomes logical each frame, at whatever scale that frame has.
+      pointerRef <- newIORef Nothing
       cursorRef <- newIORef UiCursorDefault
       now0 <- getMonotonicTime
       lastFrameRef <- newIORef now0
@@ -159,31 +155,35 @@ runChibiAppWith opts initial view = inBoundThread $
               if icon == R.rgfw_mouseArrow
                 then R.setMouseDefault win
                 else R.setMouseStandard win icon
-          drainEvents = do
-            scale <- readIORef (ctxScale ctx)
-            evs <- pollRgfwEvents win evPtr scale
-            modifyIORef' inputRef (\inp -> foldl' applyRgfwEvent inp evs)
-            pure (RgfwEvClose `elem` evs)
+          -- Fold the queued events into the input; 'True' when the window
+          -- was asked to close.
+          drainEvents closed = do
+            ev <- R.pollEvent win evPtr
+            case ev of
+              R.EventNone -> pure closed
+              R.EventWindowClose -> drainEvents True
+              R.EventMouseMotion x y -> do
+                writeIORef pointerRef (Just (V2 (fromIntegral x) (fromIntegral y)))
+                drainEvents closed
+              R.EventOther t | t == R.rgfw_mouseLeave -> writeIORef pointerRef Nothing >> drainEvents closed
+              _ -> modifyIORef' inputRef (`applyEvent` ev) >> drainEvents closed
           syncWindow = do
             (pw, ph) <- R.windowSize win
             monScale <- R.windowScale win
             userScale <- readIORef (ctxScaleOverride ctx)
             oldScale <- readIORef (ctxScale ctx)
             let s = resolveScale userScale monScale
-            when (s /= oldScale) $ do
-              setScale ctx s
-              -- Events drained above used the old scale. Rebase even when
-              -- the pointer did not move during this monitor/zoom change.
-              modifyIORef' inputRef $ \inp ->
-                let V2 x y = inputMousePos inp
-                 in inp {inputMousePos = V2 (x * oldScale / s) (y * oldScale / s)}
+            when (s /= oldScale) (setScale ctx s)
             scale <- readIORef (ctxScale ctx)
+            focused <- R.windowFocused win
+            pointer <- readIORef pointerRef
             let logical :: Int -> Float
                 logical v =
                   fromIntegral
                     (max 1 (round (fromIntegral v / realToFrac scale :: Double) :: Int))
-                logicalSize = Size (logical pw) (logical ph)
-            modifyIORef' inputRef (\i -> i {inputWindowSize = logicalSize})
+                place = maybe applyPointerLeave (\(V2 x y) i -> i {inputMousePos = V2 (x / scale) (y / scale)}) pointer
+            modifyIORef' inputRef $ \i ->
+              (place i) {inputWindowSize = Size (logical pw) (logical ph), inputWindowFocused = focused}
           renderAndSwap renderer = do
             inp0 <- readIORef inputRef
             scale <- readIORef (ctxScale ctx)
@@ -191,11 +191,8 @@ runChibiAppWith opts initial view = inBoundThread $
             theme1 <- readIORef (ctxTheme ctx)
             (_, dd) <- runFrame ctx inp0 view
             images <- readIORef (ctxImages ctx)
-            imagesChanged <- uploadImagesGl renderer images
-            damage0 <- trackFrame snapRef (inputWindowSize inp0) dd
-            -- New texture contents repaint the same quads differently.
-            let damage = if imagesChanged then DamageFull else damage0
-            renderFrameGl renderer font scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage
+            damage <- trackFrame snapRef (inputWindowSize inp0) dd
+            renderFrameGl renderer font images scale (max 1 pw) (max 1 ph) (themeWindow theme1) dd damage
             R.swapBuffersGL win
             -- Clear one-shot events and stamp the timing of the frame that
             -- just ran onto the next one.
@@ -211,19 +208,15 @@ runChibiAppWith opts initial view = inBoundThread $
           loop renderer = do
             quit <- readIORef (ctxQuit ctx)
             requested <- readIORef (ctxFrameRequest ctx)
-            focus <- readIORef (ctxFocus ctx)
-            winFocused <- R.windowFocused win
+            wakeAt <- readIORef (ctxWakeAt ctx)
             now <- getMonotonicTime
-            -- A focused widget's caret toggles every half second: wake at
-            -- the next toggle rather than at the refresh pace.
-            let untilBlink = max 1 (ceiling ((fromIntegral (floor (now * 2) + 1 :: Int) / 2 - now) * 1000))
-                wait
+            let wait
                   | requested = timeoutMs
-                  | winFocused && focus /= noWidget = untilBlink
-                  | otherwise = -1
+                  | isInfinite wakeAt = -1
+                  | otherwise = max 1 (ceiling ((wakeAt - now) * 1000))
             unless quit $ do
               R.waitForEvent wait
-              closed <- drainEvents
+              closed <- drainEvents False
               syncWindow
               renderAndSwap renderer
               unless closed (loop renderer)
@@ -335,69 +328,30 @@ keypadRgfwKeys =
 modsFromRgfw :: Word8 -> Modifiers
 modsFromRgfw m = modifiersFromBits m R.rgfw_modShift R.rgfw_modControl R.rgfw_modAlt R.rgfw_modSuper
 
--- | The RGFW standard cursor for a cursor kind, after 'cursorFallback'.
--- 'R.rgfw_mouseArrow' stands for the platform's default arrow.
+-- | The RGFW standard cursor for a cursor kind. 'R.rgfw_mouseArrow' stands
+-- for the platform's default arrow.
 mapRgfwCursor :: UiCursorKind -> Word8
-mapRgfwCursor kind = case cursorFallback kind of
+mapRgfwCursor = \case
   UiCursorPointer -> R.rgfw_mousePointingHand
   UiCursorText -> R.rgfw_mouseIbeam
   _ -> R.rgfw_mouseArrow
 
--- | An RGFW event translated for the input fold.
-data RgfwEvent
-  = RgfwEvClose
-  | RgfwEvMotion !Float !Float
-  | RgfwEvButton !Word8 !Bool
-  | RgfwEvLeave -- ^ the pointer left the window
-  | RgfwEvScroll !Float !Float
-  | RgfwEvChar !Char -- ^ typed character
-  | RgfwEvKey !Word32 !Word8 !Bool -- ^ key, modifiers, down (including repeats) or up
-  | RgfwEvFocusLost -- ^ the window lost keyboard focus
-  deriving (Eq, Show)
-
--- | Drain the RGFW queue and decode it at a scale.
-pollRgfwEvents :: R.Window -> Ptr R.RGFW_event -> Float -> IO [RgfwEvent]
-pollRgfwEvents win evPtr scale = drain []
-  where
-    drain acc = do
-      ev <- R.pollEvent win evPtr
-      case ev of
-        R.EventNone -> pure (decodeRgfwEvents scale (reverse acc))
-        _ -> drain (ev : acc)
-
--- | Translate a batch of raw events in queue order. Pointer positions are
--- divided by the logical scale. Control characters are dropped: some
--- platforms send Ctrl+letter as one, and the key event already reports the
--- chord.
-decodeRgfwEvents :: Float -> [R.Event] -> [RgfwEvent]
-decodeRgfwEvents scale = mapMaybe $ \case
-  R.EventWindowClose -> Just RgfwEvClose
-  R.EventMouseMotion x y -> Just (RgfwEvMotion (fromIntegral x / scale) (fromIntegral y / scale))
-  R.EventMouseButton btn down -> Just (RgfwEvButton btn down)
-  -- RGFW's wheel is positive up and left; the input's is down and right.
-  R.EventMouseScroll dx dy -> Just (RgfwEvScroll (negate dx) (negate dy))
-  R.EventOther t
-    | t == R.rgfw_mouseLeave -> Just RgfwEvLeave
-    | t == R.rgfw_windowFocusOut -> Just RgfwEvFocusLost
-  R.EventKeyPress k m -> Just (RgfwEvKey k m True)
-  R.EventKeyRepeat k m -> Just (RgfwEvKey k m True)
-  R.EventKeyRelease k m -> Just (RgfwEvKey k m False)
-  R.EventKeyChar ch | isPrint ch -> Just (RgfwEvChar ch)
-  _ -> Nothing
-
--- | Accumulate a decoded event into frame input. The caller handles close
--- events separately; motion coordinates are already scaled by decoding.
-applyRgfwEvent :: Input -> RgfwEvent -> Input
-applyRgfwEvent inp ev = case ev of
-  RgfwEvClose -> inp
-  RgfwEvMotion x y -> inp {inputMousePos = V2 x y}
+-- | Fold one RGFW event into frame input; the session handles motion,
+-- leave and close itself. Control characters are dropped: some platforms
+-- send Ctrl+letter as one, and the key event already reports the chord.
+applyEvent :: Input -> R.Event -> Input
+applyEvent inp = \case
   -- RGFW numbers buttons from 0 in 'mouseButtonNumber' order: left, middle,
   -- right, back, forward, then the rest.
-  RgfwEvButton btn down -> applyMouseButton (mouseButtonNumber (fromIntegral btn + 1)) down inp
-  RgfwEvLeave -> applyPointerLeave inp
-  RgfwEvScroll dx dy -> inp {inputScroll = let V2 sx sy = inputScroll inp in V2 (sx + dx) (sy + dy)}
-  RgfwEvChar c -> inp {inputChars = inputChars inp ++ [c]}
-  -- 'applyKey' detects auto-repeat because the key is already held.
-  RgfwEvKey k m down ->
-    (maybe inp (\key -> applyKey key down inp) (mapRgfwKey k m)) {inputModifiers = modsFromRgfw m}
-  RgfwEvFocusLost -> releaseAllKeys inp
+  R.EventMouseButton btn down -> applyMouseButton (mouseButtonNumber (fromIntegral btn + 1)) down inp
+  -- RGFW's wheel is positive up and left; the input's is down and right.
+  R.EventMouseScroll dx dy -> inp {inputScroll = let V2 sx sy = inputScroll inp in V2 (sx - dx) (sy - dy)}
+  R.EventKeyChar ch | isPrint ch -> inp {inputChars = inputChars inp ++ [ch]}
+  R.EventKeyPress k m -> key k m True
+  R.EventKeyRepeat k m -> key k m True
+  R.EventKeyRelease k m -> key k m False
+  R.EventOther t | t == R.rgfw_windowFocusOut -> releaseAllKeys inp
+  _ -> inp
+  where
+    -- 'applyKey' detects auto-repeat because the key is already held.
+    key k m down = (maybe inp (\k' -> applyKey k' down inp) (mapRgfwKey k m)) {inputModifiers = modsFromRgfw m}

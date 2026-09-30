@@ -10,6 +10,7 @@ module ChibiUI.Internal.Layout
   , stepLayout
   , placeLayout
   , remainingWidth
+  , remainingHeight
   , beginGroup
   , contentSize
   , beginViewport
@@ -46,6 +47,8 @@ data LayoutState = LayoutState
   -- ^ A one-shot height for the next widget.
   , lsAvailW :: {-# UNPACK #-} !Float
   -- ^ Width from the indentation to the right edge of this scope.
+  , lsBottom :: {-# UNPACK #-} !Float
+  -- ^ This scope's bottom edge, in window coordinates.
   , lsBounded :: !Bool
   -- ^ Whether 'lsBounds' holds an item placed in this scope.
   , lsBounds :: {-# UNPACK #-} !Rect
@@ -67,6 +70,7 @@ freshLayout =
     , lsNextW = Nothing
     , lsNextH = Nothing
     , lsAvailW = 0
+    , lsBottom = 0
     , lsBounded = False
     , lsBounds = Rect 0 0 0 0
     }
@@ -115,6 +119,9 @@ placeLayout gap sz ls = (r, ls
 remainingWidth :: LayoutState -> Float
 remainingWidth ls = max 0 (lsIndent ls + lsAvailW ls - lsPenX ls)
 
+remainingHeight :: LayoutState -> Float
+remainingHeight ls = max 0 (lsBottom ls - lsLineY ls)
+
 -- | A group measures its children independently, then occupies one parent item.
 beginGroup :: Bool -> LayoutState -> LayoutState
 beginGroup horizontal ls = ls
@@ -122,6 +129,7 @@ beginGroup horizontal ls = ls
   , lsFlowRow = horizontal
   , lsIndent = lsPenX ls
   , lsAvailW = max 0 (fromMaybe (remainingWidth ls) (lsNextW ls))
+  , lsBottom = maybe (lsBottom ls) (lsLineY ls +) (lsNextH ls)
   , lsLineH = 0
   , lsLast = Rect (lsPenX ls) (lsLineY ls) 0 0
   , lsNextW = Nothing
@@ -138,14 +146,17 @@ contentSize (V2 x y) child
       let b = lsBounds child
        in Size (max 0 (rectX b + rectW b - x)) (max 0 (rectY b + rectH b - y))
 
--- | Lay out scrolling content in its own shifted, vertical coordinate space.
+-- | Lay out scrolling content in its own shifted, vertical coordinate
+-- space. Its bottom is one viewport below its top.
 beginViewport :: Rect -> LayoutState -> LayoutState
 beginViewport r ls = ls
   { lsPenX = rectX r
   , lsLineY = rectY r
   , lsIndent = rectX r
   , lsAvailW = max 0 (rectW r)
+  , lsBottom = rectY r + rectH r
   , lsRowOpen = False
+
   , lsFlowRow = False
   , lsLineH = 0
   , lsBounded = False

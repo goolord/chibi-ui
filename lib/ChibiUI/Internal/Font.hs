@@ -6,10 +6,10 @@
 -- and one line height; measurement walks glyph advances, so text is
 -- variable-width.
 --
--- Rasterized glyphs are memoized per raster size in a strict 'IntMap', so
--- steady-state frames measure and draw text without FFI crossings or
--- per-glyph heap allocation; a scale change drops the cache with the old
--- C font.
+-- Rasterized glyphs are memoized per raster size, Latin-1 in a table read
+-- directly and the rest in a strict 'IntMap', so steady-state frames
+-- measure and draw text without FFI crossings or per-glyph heap
+-- allocation; a scale change drops the cache with the old C font.
 module ChibiUI.Internal.Font
   ( Font
   , lineHeight
@@ -39,6 +39,7 @@ import Data.Word (Word8, Word32)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
+import GHC.IOArray (IOArray, newIOArray, unsafeReadIOArray, unsafeWriteIOArray)
 import ChibiUI.Internal.Draw (DrawArena, emitQuadUV)
 import ChibiUI.Internal.Types (Color, validScale)
 
@@ -85,6 +86,8 @@ data FontState = FontState
   , fsDescent :: {-# UNPACK #-} !Float
   , fsSpaceAdv :: {-# UNPACK #-} !Float
   -- ^ The space glyph's advance at the raster size, in device pixels.
+  , fsLow :: !(IOArray Int GlyphDev)
+  -- ^ Rasterized glyphs below 'lowGlyphs' by code point, else 'missGlyph'.
   }
 
 -- | The loaded font: its bytes for scale rebuilds, the state at the
@@ -93,9 +96,13 @@ data Font = Font
   { fBytes :: !BS.ByteString
   , fState :: !(IORef FontState)
   , fGlyphs :: !(IORef (IntMap GlyphDev))
-  -- ^ Rasterized glyphs by code point, valid for the current handle and
-  -- raster size only.
+  -- ^ Rasterized glyphs from 'lowGlyphs' up, by code point, valid for the
+  -- current handle and raster size only.
   }
+
+-- | Code points cached in the direct table: Latin-1.
+lowGlyphs :: Int
+lowGlyphs = 256
 
 foreign import ccall unsafe "chibi_rfont_init"
   c_init :: Ptr Word8 -> Word32 -> Word32 -> Word32 -> Word32 -> IO (Ptr ())
@@ -141,7 +148,7 @@ peekGlyph p = do
 -- caller may release them.
 newFont :: ByteString -> IO Font
 newFont bytes = do
-  st <- newIORef (FontState nullPtr 0 0 0 0 0)
+  st <- newIORef . FontState nullPtr 0 0 0 0 0 =<< newIOArray (0, lowGlyphs - 1) missGlyph
   glyphs <- newIORef IM.empty
   let f = Font {fBytes = bytes, fState = st, fGlyphs = glyphs}
   fontSetScale f 1
@@ -161,6 +168,7 @@ fontSetScale f scale = do
       BSU.unsafeUseAsCStringLen (fBytes f) $ \(p, len) ->
         c_init (castPtr p) (fromIntegral len) (fromIntegral sizeD) (fromIntegral atlasWidth) (fromIntegral atlasHeight)
     when (h == nullPtr) $ fail "chibi-ui: font failed to load"
+    low <- newIOArray (0, lowGlyphs - 1) missGlyph
     (fh, ds, sa) <- allocaBytes 12 $ \m -> do
       c_metrics h m (plusPtr m 4) (plusPtr m 8)
       (,,) <$> (peekByteOff m 0 :: IO Float) <*> (peekByteOff m 4 :: IO Float) <*> (peekByteOff m 8 :: IO Float)
@@ -175,6 +183,7 @@ fontSetScale f scale = do
           -- no glyph box, so its width comes from the font's hmtx entry
           -- scaled by the raster size.
         , fsSpaceAdv = if fh > 0 then sa * fromIntegral sizeD / fh else 0
+        , fsLow = low
         }
     writeIORef (fGlyphs f) IM.empty
 
@@ -188,29 +197,22 @@ fontFree f = do
 -- | The width of one line of text, in logical pixels: the sum of glyph
 -- advances. Newlines advance nothing. Measuring rasterizes the glyphs, so
 -- repeated frames are cache reads; the loop walks the text by UTF-8 byte
--- offsets and the glyph cache by pure map lookups, allocating nothing per
--- character.
+-- offsets, allocating nothing per character.
 fontMeasure :: Font -> Text -> IO Float
 fontMeasure f t = do
   st <- readIORef (fState f)
-  glyphs <- readIORef (fGlyphs f)
-  let scale = fsScale st
-      sa = fsSpaceAdv st
-      end = TU.lengthWord8 t
-      go !ms !acc !i
+  let end = TU.lengthWord8 t
+      go !acc !i
         | i >= end = pure acc
         | otherwise = case charAt t i of
             (# cp, d #)
-              | cp == cpSpace || cp == cpTab -> go ms (acc + sa) (i + d)
-              | cp == cpLF || cp == cpCR -> go ms acc (i + d)
-              | otherwise -> case IM.findWithDefault missGlyph cp ms of
-                  g
-                    | gdAdvance g >= 0 -> go ms (acc + gdAdvance g) (i + d)
-                    | otherwise -> do
-                        (ms', g') <- rasterizeInto ms f cp
-                        go ms' (acc + max 0 (gdAdvance g')) (i + d)
-  dev <- go glyphs 0 0
-  pure (dev * recip scale)
+              | cp == cpSpace || cp == cpTab -> go (acc + fsSpaceAdv st) (i + d)
+              | cp == cpLF || cp == cpCR -> go acc (i + d)
+              | otherwise -> do
+                  g <- glyph f st cp
+                  go (acc + max 0 (gdAdvance g)) (i + d)
+  dev <- go 0 0
+  pure (dev * recip (fsScale st))
 
 -- | The sentinel 'findWithDefault' returns for a glyph not yet
 -- rasterized: a negative advance, which no real glyph has.
@@ -233,21 +235,26 @@ charAt :: Text -> Int -> (# Int, Int #)
 charAt t !i = case TU.iter t i of
   TU.Iter c d -> (# fromEnum c, d #)
 
--- | Rasterize a code point, add it to the font's cache, and return the
--- glyph with the updated map.
-rasterizeInto :: IntMap GlyphDev -> Font -> Int -> IO (IntMap GlyphDev, GlyphDev)
-rasterizeInto glyphs f cp = do
-  st <- readIORef (fState f)
+-- | The glyph for a code point, rasterized and cached on a miss. Without
+-- a C font it stays 'missGlyph', which advances and draws nothing.
+{-# INLINE glyph #-}
+glyph :: Font -> FontState -> Int -> IO GlyphDev
+glyph f st cp = do
   g <-
-    if fsHandle st == nullPtr
-      then pure missGlyph
-      else
-        allocaBytes glyphBytes $ \p -> do
-          c_glyph (fsHandle st) (fromIntegral cp) (fromIntegral (fsSize st)) p
-          peekGlyph p
-  let !glyphs' = IM.insert cp g glyphs
-  writeIORef (fGlyphs f) glyphs'
-  pure (glyphs', g)
+    if cp < lowGlyphs
+      then unsafeReadIOArray (fsLow st) cp
+      else IM.findWithDefault missGlyph cp <$> readIORef (fGlyphs f)
+  if gdAdvance g >= 0 || fsHandle st == nullPtr then pure g else rasterize f st cp
+
+rasterize :: Font -> FontState -> Int -> IO GlyphDev
+rasterize f st cp = do
+  g <- allocaBytes glyphBytes $ \p -> do
+    c_glyph (fsHandle st) (fromIntegral cp) (fromIntegral (fsSize st)) p
+    peekGlyph p
+  if cp < lowGlyphs
+    then unsafeWriteIOArray (fsLow st) cp g
+    else modifyIORef' (fGlyphs f) (IM.insert cp g)
+  pure g
 
 -- | Draw one line of text as glyph quads into the draw arena, with the
 -- line box's top-left at the logical pen. Baseline math follows RFont's:
@@ -265,10 +272,9 @@ rasterizeInto glyphs f cp = do
 -- fractionally, so spacing stays true to 'fontMeasure'.
 fontDrawText :: Font -> DrawArena -> Float -> Float -> Color -> Text -> IO ()
 fontDrawText f arena penX penY col t = do
-  FontState {fsHandle = h, fsScale = scale, fsSize = sizeD, fsFHeight = fh, fsDescent = ds, fsSpaceAdv = sa} <-
+  st@FontState {fsHandle = h, fsScale = scale, fsSize = sizeD, fsFHeight = fh, fsDescent = ds, fsSpaceAdv = sa} <-
     readIORef (fState f)
   when (h /= nullPtr) $ do
-    glyphs <- readIORef (fGlyphs f)
     let baseline =
           if fh > 0
             then fromIntegral sizeD * (fh + ds) / fh
@@ -278,36 +284,29 @@ fontDrawText f arena penX penY col t = do
         atlasW = fromIntegral atlasWidth :: Float
         atlasH = fromIntegral atlasHeight :: Float
         end = TU.lengthWord8 t
-        go !ms !pen !i
+        go !pen !i
           | i >= end = pure ()
           | otherwise = case charAt t i of
               (# cp, d #)
-                | cp == cpLF || cp == cpCR -> go ms pen (i + d)
-                | cp == cpSpace || cp == cpTab -> go ms (pen + sa) (i + d)
-                | otherwise -> case IM.findWithDefault missGlyph cp ms of
-                    g ->
-                      if gdAdvance g < 0
-                        then do
-                          (ms', g') <- rasterizeInto ms f cp
-                          if gdAdvance g' < 0
-                            then go ms' pen (i + d) -- no font; skip it
-                            else go ms' pen i -- retry as a hit, emitting it
-                        else do
-                          when (gdW g > 0 && gdH g > 0) $
-                            let px = fromIntegral (round pen :: Int)
-                            in emitQuadUV
-                              arena
-                              ((px + gdX1 g) * invScale)
-                              ((baseY + gdY1 g) * invScale)
-                              ((px + gdX1 g + gdW g) * invScale)
-                              ((baseY + gdY1 g + gdH g) * invScale)
-                              col
-                              (fromIntegral (gdAX g) / atlasW)
-                              (fromIntegral (gdAY g) / atlasH)
-                              (fromIntegral (gdAX2 g) / atlasW)
-                              (fromIntegral (gdAY2 g) / atlasH)
-                          go ms (pen + gdAdvance g) (i + d)
-    go glyphs (penX * scale) 0
+                | cp == cpLF || cp == cpCR -> go pen (i + d)
+                | cp == cpSpace || cp == cpTab -> go (pen + sa) (i + d)
+                | otherwise -> do
+                    g <- glyph f st cp
+                    when (gdW g > 0 && gdH g > 0) $
+                      let px = fromIntegral (round pen :: Int)
+                       in emitQuadUV
+                            arena
+                            ((px + gdX1 g) * invScale)
+                            ((baseY + gdY1 g) * invScale)
+                            ((px + gdX1 g + gdW g) * invScale)
+                            ((baseY + gdY1 g + gdH g) * invScale)
+                            col
+                            (fromIntegral (gdAX g) / atlasW)
+                            (fromIntegral (gdAY g) / atlasH)
+                            (fromIntegral (gdAX2 g) / atlasW)
+                            (fromIntegral (gdAY2 g) / atlasH)
+                    go (pen + max 0 (gdAdvance g)) (i + d)
+    go (penX * scale) 0
 
 -- | The atlas coverage bytes. The pointer is stable for the font's
 -- lifetime; read it only while the dirty flag says new glyphs exist.

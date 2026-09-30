@@ -44,7 +44,6 @@ module ChibiUI.Backend
   , releasedIn
   , heldIn
   , UiCursorKind (..)
-  , cursorFallback
   , syncCursorKind
   , Color
   , Rect (..)

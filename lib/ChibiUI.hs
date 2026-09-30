@@ -101,8 +101,8 @@ module ChibiUI
 
     -- * Input queries
 
-    -- | 'keyPressed' and 'keyHeld' read the raw frame input when nothing
-    -- has the keyboard, so a focused field keeps its keys to itself.
+    -- | 'keyPressed' and 'keyHeld' read the raw frame input unless a text
+    -- field has the keyboard, so a focused field keeps its keys to itself.
   , getInput
   , mousePos
   , mousePressed
@@ -140,6 +140,7 @@ module ChibiUI
   , getClipboard
   , setClipboard
   , requestFrame
+  , requestFrameAt
   , quitUi
 
     -- * Re-exports

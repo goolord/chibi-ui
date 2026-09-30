@@ -35,13 +35,12 @@ module ChibiUI.Internal.Input
   , applyMouseButton
   , applyPointerLeave
   , UiCursorKind (..)
-  , cursorFallback
   , syncCursorKind
   , clearEphemeral
   ) where
 
 import Control.Monad (unless, when)
-import Data.Bits (Bits, clearBit, countTrailingZeros, setBit, testBit, zeroBits, (.&.), (.|.))
+import Data.Bits (Bits, clearBit, countTrailingZeros, setBit, testBit, zeroBits, (.&.))
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Word (Word32)
 import System.Info (os)
@@ -118,6 +117,9 @@ data Input = Input
   -- ^ Typed text this frame, in event order.
   , inputModifiers :: !Modifiers
   , inputWindowSize :: {-# UNPACK #-} !Size
+  , inputWindowFocused :: !Bool
+  -- ^ Whether the window has keyboard focus; a focused field blinks its
+  -- caret only then.
   , inputDeltaTime :: {-# UNPACK #-} !Float
   }
   deriving (Eq, Show)
@@ -148,8 +150,9 @@ instance Pressable MouseButton where
   {-# INLINE heldIn #-}
   heldIn b = buttonsMember b . inputButtonsHeld
 
--- | No events or held buttons, with an 800x600 window and zero elapsed time.
--- The native session updates window size and delta time each frame.
+-- | No events or held buttons, with a focused 800x600 window and zero
+-- elapsed time. The native session updates window size, focus and delta
+-- time each frame.
 emptyInput :: Input
 emptyInput =
   Input
@@ -164,22 +167,18 @@ emptyInput =
     , inputChars = []
     , inputModifiers = noModifiers
     , inputWindowSize = Size 800 600
+    , inputWindowFocused = True
     , inputDeltaTime = 0
     }
 
 -- | Backend-independent cursor shape requested by a hovered control. The
--- shapes are CSS's cursors. Where the platform lacks one, the backend shows
--- its 'cursorFallback'.
+-- shapes are CSS's cursors.
 data UiCursorKind
   = UiCursorDefault
   | UiCursorPointer
   | UiCursorText
   | UiCursorHidden
   deriving (Eq, Show, Enum, Bounded)
-
--- | The closest shape among the cursors RGFW has.
-cursorFallback :: UiCursorKind -> UiCursorKind
-cursorFallback = id
 
 -- | Show the platform cursor for a kind when it differs from the kind last
 -- shown, which @ref@ holds. 'UiCursorHidden' hides the pointer through
@@ -288,13 +287,6 @@ newtype MouseButtons = MouseButtons Word32
 
 instance Show MouseButtons where
   showsPrec d bs = showParen (d > 10) (showString "buttonsFromList " . showsPrec 11 (buttonsToList bs))
-
-instance Semigroup MouseButtons where
-  {-# INLINE (<>) #-}
-  MouseButtons a <> MouseButtons b = MouseButtons (a .|. b)
-
-instance Monoid MouseButtons where
-  mempty = noButtons
 
 -- | No button.
 noButtons :: MouseButtons

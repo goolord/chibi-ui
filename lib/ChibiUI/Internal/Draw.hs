@@ -1,13 +1,13 @@
 -- | The draw list: widgets emit quads into growable vertex and index
--- buffers, batched into commands that share a clip rectangle and a texture.
--- The vertex layout is nano-ui RGFW's 32-byte quad: logical position, RGBA
+-- buffers, batched into commands that share a texture. Every quad is cut
+-- to the current clip as it is emitted, so commands carry no clip and the
+-- renderer needs no scissor to honour one. The vertex layout is nano-ui RGFW's 32-byte quad: logical position, RGBA
 -- as four floats, and UV, so the C renderer needs no adaptation beyond its
 -- name. Texture ids: 0 is flat geometry, 1 the glyph atlas, and 2 or more
 -- are backend-registered images.
 module ChibiUI.Internal.Draw
   ( DrawArena
   , DrawCmd (..)
-  , cmdClipRect
   , DrawData (..)
   , newDrawArena
   , resetDrawArena
@@ -66,22 +66,13 @@ texGlyphAtlas = 1
 texImage :: Int -> Int
 texImage img = img + 2
 
--- | One draw batch: everything drawn under one clip with one texture.
+-- | One draw batch: a run of quads sampling one texture.
 data DrawCmd = DrawCmd
-  { cmdClipX :: {-# UNPACK #-} !Float
-  , cmdClipY :: {-# UNPACK #-} !Float
-  , cmdClipW :: {-# UNPACK #-} !Float
-  , cmdClipH :: {-# UNPACK #-} !Float
-  , cmdTextureId :: {-# UNPACK #-} !Int
+  { cmdTextureId :: {-# UNPACK #-} !Int
   , cmdIndexOffset :: {-# UNPACK #-} !Word32
   , cmdIndexCount :: {-# UNPACK #-} !Word32
   }
   deriving (Eq, Show)
-
--- | A command's clip rectangle in logical pixels.
-{-# INLINE cmdClipRect #-}
-cmdClipRect :: DrawCmd -> Rect
-cmdClipRect c = Rect (cmdClipX c) (cmdClipY c) (cmdClipW c) (cmdClipH c)
 
 -- | One frame's geometry and batches. Vertex and index pointers refer to
 -- reusable arena storage: render or copy them before running another frame
@@ -117,12 +108,11 @@ data DrawArena = DrawArena
   , daLastClip :: !(IORef Rect)
   , daLastTexture :: !(IORef Int)
   , daClipStack :: !(IORef [Rect])
-  , daBatchClip :: !(IORef Rect)
   , daBatchTexture :: !(IORef Int)
   , daBatchStart :: !URef
   , daBatchCount :: !URef
-  -- ^ The open batch: the clip and texture it runs under, its first index,
-  -- and its index count so far. A count of zero means no batch is open.
+  -- ^ The open batch: its texture, its first index, and its index count
+  -- so far. A count of zero means no batch is open.
   }
 
 -- | A brand-new arena.
@@ -142,7 +132,6 @@ newDrawArena = do
   icap <- newIORef 0
   vcnt <- newURef 0
   icnt <- newURef 0
-  bclip <- newIORef infiniteClip
   btex <- newIORef texFlat
   bstart <- newURef 0
   bcount <- newURef 0
@@ -160,7 +149,6 @@ newDrawArena = do
       , daLastClip = lcref
       , daLastTexture = ltref
       , daClipStack = cstack
-      , daBatchClip = bclip
       , daBatchTexture = btex
       , daBatchStart = bstart
       , daBatchCount = bcount
@@ -183,7 +171,6 @@ resetDrawArena a = do
   writeIORef (daLastClip a) infiniteClip
   writeIORef (daLastTexture a) texFlat
   writeIORef (daClipStack a) []
-  writeIORef (daBatchClip a) infiniteClip
   writeIORef (daBatchTexture a) texFlat
   writeURef (daBatchStart a) 0
   writeURef (daBatchCount a) 0
@@ -217,10 +204,9 @@ pendingCmd a = do
   if n <= 0
     then pure []
     else do
-      Rect x y w h <- readIORef (daBatchClip a)
       t <- readIORef (daBatchTexture a)
       s <- readURef (daBatchStart a)
-      pure [DrawCmd x y w h t (fromIntegral s) (fromIntegral n)]
+      pure [DrawCmd t (fromIntegral s) (fromIntegral n)]
 
 -- | Grow a buffer to at least @need@ bytes, keeping the old contents and
 -- refreshing the cached base pointer. Inlined, so the steady-state
@@ -297,7 +283,7 @@ emitQuadUV a !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
           uy y = if h > 0 then v0 + (v1 - v0) * ((y - y0) / h) else v0
       base <- pushVertices a nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
       pushIndices a base
-      batchCommand a clip
+      batchCommand a
 
 -- | Corners of a rect as @x0, y0, x1, y1@.
 {-# INLINE clipEdges #-}
@@ -342,38 +328,26 @@ pushIndices a !base = do
   writeQuadIndices buf n base
   writeURef (daIndexCount a) (n + 6)
 
--- | Extend the open batch when the quad's clip and texture continue it;
--- else close the open batch into the command list and open a fresh one.
--- Continuing a batch only bumps a counter, so the common run of quads
--- under one clip and texture allocates nothing per quad.
+-- | Extend the open batch when the quad's texture continues it; else close
+-- the open batch into the command list and open a fresh one. Continuing a
+-- batch only bumps a counter, so the common run of quads under one
+-- texture allocates nothing per quad.
 {-# INLINE batchCommand #-}
-batchCommand :: DrawArena -> Rect -> IO ()
-batchCommand a clip = do
+batchCommand :: DrawArena -> IO ()
+batchCommand a = do
   texture <- readIORef (daLastTexture a)
   idxCount <- readURef (daIndexCount a)
   let idxStart = idxCount - 6
-  openClip <- readIORef (daBatchClip a)
   openTex <- readIORef (daBatchTexture a)
   openCount <- readURef (daBatchCount a)
-  if openCount > 0 && openClip == clip && openTex == texture
+  if openCount > 0 && openTex == texture
     then writeURef (daBatchCount a) (openCount + 6)
     else do
       when (openCount > 0) $ do
         openStart <- readURef (daBatchStart a)
-        modifyIORef'
-          (daCommands a)
-          ( DrawCmd
-              (rectX openClip)
-              (rectY openClip)
-              (rectW openClip)
-              (rectH openClip)
-              openTex
-              (fromIntegral openStart)
-              (fromIntegral openCount)
-              :
-          )
-      writeIORef (daBatchClip a) clip
+        modifyIORef' (daCommands a) (DrawCmd openTex (fromIntegral openStart) (fromIntegral openCount) :)
       writeIORef (daBatchTexture a) texture
+
       writeURef (daBatchStart a) idxStart
       writeURef (daBatchCount a) 6
 

@@ -32,7 +32,6 @@ import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Editor
 import ChibiUI.Internal.Menu (openContextMenu)
-import ChibiUI.Internal.Layout (LayoutState (..))
 import qualified ChibiUI.Internal.Layout as Layout
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Store
@@ -69,39 +68,38 @@ button t = do
     Size w h <- textSize t
     pure (Size (w + widgetPad * 2) (h + widgetPad * 2))
   th <- theme
-  (clicked, hov, act, focused) <- activate wid r
+  i <- interaction wid r
   let surface
-        | act = themeSurfaceActive th
-        | hov = themeSurfaceHover th
+        | iActive i = themeSurfaceActive th
+        | iHovered i = themeSurfaceHover th
         | otherwise = themeSurface th
   fillRectUI r surface
-  strokeRectUI r 1 (if focused then themeAccent th else themeBorder th)
+  strokeRectUI r 1 (if iFocused i then themeAccent th else themeBorder th)
   textInRect r t (themeText th)
-  pure clicked
+  pure (iClicked i)
 
--- Buttons, tree headers and sliders share Tab reachability, the pointer
--- grab a press takes (with the keyboard), and the hover cursor. Returns
--- whether the widget is hovered, holds the grab, and has focus.
-grab :: WidgetId -> Rect -> ChibiUI model (Bool, Bool, Bool)
-grab wid r = do
-  addFocusable wid r
+-- | What the pointer and keyboard did to a pressable widget this frame.
+data Interaction = Interaction {iHovered, iActive, iFocused, iClicked :: !Bool}
+
+-- Buttons, tree headers, sliders and tables share Tab reachability, the
+-- pointer grab a press takes (with the keyboard), and the pointer cursor.
+-- A click is a release over the widget the press grabbed, or Enter/Space
+-- while focused.
+interaction :: WidgetId -> Rect -> ChibiUI model Interaction
+interaction wid r = do
+  addFocusable wid r False
   hov <- hovered r
-  pressed <- mousePressed
-  when (hov && pressed) (void (claimActive wid) >> requestFocus wid)
+  inp <- getInput
+  when (hov && pressedIn MouseLeft inp) (void (claimActive wid) >> requestFocus wid)
   act <- isActive wid
   focused <- isFocused wid
-  when hov (wantCursor UiCursorPointer)
-  pure (hov, act, focused)
-
--- Buttons and tree headers also click on release over the widget, or on
--- Enter/Space while focused. Returns the click with 'grab''s state.
-activate :: WidgetId -> Rect -> ChibiUI model (Bool, Bool, Bool, Bool)
-activate wid r = do
-  (hov, act, focused) <- grab wid r
-  released <- mouseReleased
-  inp <- getInput
-  let clicked = (released && act && hov) || (focused && (pressedIn KeyEnter inp || pressedIn KeySpace inp))
-  pure (clicked, hov, act, focused)
+  when (hov || act) (wantCursor UiCursorPointer)
+  pure Interaction
+    { iHovered = hov
+    , iActive = act
+    , iFocused = focused
+    , iClicked = (releasedIn MouseLeft inp && act && hov) || (focused && any (`pressedIn` inp) [KeyEnter, KeySpace])
+    }
 
 -- | A collapsible branch, initially closed. Click or Enter/Space toggles;
 -- Left closes and Right opens a focused header. Children run only while open.
@@ -115,19 +113,19 @@ treeNode title body = column $ do
   let key = slotKey SlotTreeOpen (slotOf wid)
       gutter = lineHeight + widgetPad
   wasOpen <- storeRead (memberSlot fieldInt key)
-  (clicked, hov, active, focused) <- activate wid r
+  i <- interaction wid r
   inp <- getInput
-  let open | focused && pressedIn KeyLeft inp = False
-           | focused && pressedIn KeyRight inp = True
-           | clicked = not wasOpen
+  let open | iFocused i && pressedIn KeyLeft inp = False
+           | iFocused i && pressedIn KeyRight inp = True
+           | iClicked i = not wasOpen
            | otherwise = wasOpen
   when (open /= wasOpen) $ do
     storeUpdate (if open then insertSlot fieldInt key 1 else deleteSlot fieldInt key)
     requestFrame
   th <- theme
   withClip r $ do
-    when (hov || active) (fillRectUI r (if active then themeSurfaceActive th else themeSurfaceHover th))
-    when focused (strokeRectUI r 1 (themeAccent th))
+    when (iHovered i || iActive i) (fillRectUI r (if iActive i then themeSurfaceActive th else themeSurfaceHover th))
+    when (iFocused i) (strokeRectUI r 1 (themeAccent th))
     let x = rectX r + gutter / 2
         y = rectY r + rectH r / 2
     fillRectUI (Rect (x - 4.5) (y - 0.5) 9 1) (themeTextDim th)
@@ -196,18 +194,17 @@ slider value lo hi = do
     avail <- availWidth
     pure (Size (min avail 160) fieldHeight)
   th <- theme
-  (_, act, focused) <- grab wid r
-  held <- mouseHeld
+  i <- interaction wid r
   inp <- getInput
-  -- A dragged thumb keeps the pointer cursor off the track.
-  when act (wantCursor UiCursorPointer)
-  let range = hi - lo
+  let act = iActive i
+      focused = iFocused i
+      range = hi - lo
       frac v = if range > 0 then clamp01 ((v - lo) / range) else 0
       atFrac f = lo + f * range
       underPointer = clamp01 ((v2X (inputMousePos inp) - rectX r) / max 1 (rectW r))
       step = range / 10
       moved
-        | act && held = atFrac underPointer
+        | act && heldIn MouseLeft inp = atFrac underPointer
         | focused && pressedIn KeyLeft inp = clamp lo hi (value - step)
         | focused && pressedIn KeyRight inp = clamp lo hi (value + step)
         | otherwise = value
@@ -253,7 +250,7 @@ stepField event state = case (event, state) of
 textField :: FieldMode -> ChibiUI model Size -> Text -> (Input -> Text -> Text) -> ChibiUI model Text
 textField mode measure value transform = do
   (wid, r) <- widgetRect measure
-  addFocusable wid r
+  addFocusable wid r True
   editTextField mode wid r value transform
 
 -- Stepping updates the same draft that is painted and subsequently edited.
@@ -468,12 +465,15 @@ drawField mode k r ed focused reveal th = do
           withClip selected (drawTextAt origin 0 0 text (themeAccentText th))
     when focused $ do
       t0 <- uiTime
-      let blink = floor (t0 * 2) `mod` (2 :: Int) == (0 :: Int)
-      -- The caret's quad stays in the draw list while blinked off, so a
-      -- blink changes one quad's colour and damages only the caret.
+      inp <- getInput
+      -- The caret toggles every half second while the window has focus.
+      -- Its quad stays in the draw list while blinked off, so a blink
+      -- changes one quad's colour and damages only the caret.
+      let half = floor (t0 * 2) :: Int
+      when (inputWindowFocused inp) (requestFrameAt (fromIntegral (half + 1) / 2))
       fillRectUI
         (Rect (innerX - shift + caretPen) (top + fromIntegral caretRow * lineHeight) 1 lineHeight)
-        (if blink then themeText th else colorTransparent)
+        (if even half then themeText th else colorTransparent)
   when hov (wantCursor UiCursorText)
 
 -- | An image the backend has registered, drawn at @w@ x @h@.
@@ -516,26 +516,24 @@ plotLines values = do
              in [V2 (xAt i) (yAt v) | (i, v) <- zip [0 :: Int ..] values]
   withClip r (drawPolyline (themeAccent th) points)
 
--- The line as overlapping axis-aligned squares: the draw list and damage
--- tracking treat every quad as a rectangle, and the squares join smoothly.
+-- The line as 2px-wide columns, one per pixel column of each segment,
+-- spanning what the segment covers there. Every quad stays a rectangle,
+-- as clipping and damage need, and a plot costs about a quad per pixel of
+-- width, however many samples or however steep.
 drawPolyline :: Color -> [V2] -> ChibiUI model ()
-drawPolyline col ps = do
-  mapM_ dot ps
-  mapM_ (uncurry link) (zip ps (drop 1 ps))
-  where
-    t = 2 :: Float
-    dot (V2 x y) = fillRectUI (Rect (x - 1) (y - 1) t t) col
-    link (V2 ax ay) (V2 bx by) = do
-      let len = sqrt ((bx - ax) * (bx - ax) + (by - ay) * (by - ay))
-          steps = max 1 (round (len / (t / 2))) :: Int
-      forM_ [1 .. steps - 1] $ \k -> do
-        let f = fromIntegral k / fromIntegral steps
-        dot (V2 (ax + (bx - ax) * f) (ay + (by - ay) * f))
+drawPolyline col ps = forM_ (zip ps (drop 1 ps)) $ \(V2 ax ay, V2 bx by) ->
+  forM_ [floor ax .. max (floor ax) (ceiling bx - 1) :: Int] $ \c -> do
+    let yAt x = ay + (by - ay) * (x - ax) / (bx - ax)
+        (y0, y1)
+          | bx > ax = (yAt (max ax (fromIntegral c)), yAt (min bx (fromIntegral c + 1)))
+          | otherwise = (ay, by)
+    fillRectUI (Rect (fromIntegral c - 0.5) (min y0 y1 - 1) 2 (abs (y1 - y0) + 2)) col
 
 -- | A basic table: a header row, zebra-striped data rows, hover
--- highlighting, and row selection on click. Returns the selected row
--- index, if any. Column widths come from the widest cell in each column,
--- scaled proportionally to fit the available or explicitly assigned width.
+-- highlighting, and row selection on click, or with Up and Down while
+-- focused. Returns the selected row index, if any. Column widths come from
+-- the widest cell in each column, scaled proportionally to fit the
+-- available or explicitly assigned width.
 table :: [Text] -> [[Text]] -> ChibiUI model (Maybe Int)
 table headers rows = do
   th <- theme
@@ -561,17 +559,22 @@ table headers rows = do
           drawTextIn (Rect (x + cellPadX) (y + cellPadY)
             (max 0 (w - cellPadX * 2)) lineHeight) cell (themeText th)
         fillRectUI (Rect (rectX r) (y + rowH - 1) (rectW r) 1) (themeBorder th)
-  mouse <- mousePos
-  pressed <- mousePressed
-  inTable <- hovered r
-  let hoverI
-        | inTable = Just (floor ((v2Y mouse - rectY r - rowH) / rowH) :: Int)
+  ia <- interaction wid r
+  inp <- getInput
+  stored <- storeRead (findSlot fieldInt 0 selKey)
+  -- Rows count from 1 in the store, so 0 is no selection.
+  let n = length rows
+      hoverI
+        | iHovered ia = Just (floor ((v2Y (inputMousePos inp) - rectY r - rowH) / rowH) :: Int)
         | otherwise = Nothing
-      hoverValid = maybe False (\i -> i >= 0 && i < length rows) hoverI
-  when (pressed && hoverValid) $
-    storeUpdate (insertSlot fieldInt selKey (fromMaybe 0 hoverI + 1))
-  sel1 <- storeRead (findSlot fieldInt 0 selKey)
-  let selIdx = if 1 <= sel1 && sel1 <= length rows then sel1 else 0
+      current = if 1 <= stored && stored <= n then stored else 0
+      step d = if n == 0 then 0 else clamp 1 n (current + d)
+      selIdx
+        | pressedIn MouseLeft inp, Just h <- hoverI, h >= 0 && h < n = h + 1
+        | iFocused ia && pressedIn KeyDown inp = step 1
+        | iFocused ia && pressedIn KeyUp inp = step (-1)
+        | otherwise = current
+  when (selIdx /= current) (storeUpdate (insertSlot fieldInt selKey selIdx))
   withClip r $ do
     drawRow (rectY r) headers (themeSurface th)
     forM_ (zip3 [0 ..] (iterate (+ rowH) (rectY r + rowH)) rows) $ \(i, y, cells) -> do
@@ -580,27 +583,23 @@ table headers rows = do
              | odd i = themeRowAlt th
              | otherwise = themeWindow th
       drawRow y cells bg
-  when inTable (wantCursor UiCursorPointer)
+    when (iFocused ia) (strokeRectUI r 1 (themeAccent th))
   pure (if selIdx > 0 then Just (selIdx - 1) else Nothing)
 
--- | Clip and scroll a body: the region fills the line's width and runs to
--- the window's bottom padding. The wheel scrolls it while the pointer is
--- over it, and a thin scrollbar appears when the body is taller than the
--- region. Bodies do not nest.
+-- | Clip and scroll a body: the region fills the rest of its scope's width
+-- and height (the window's, less padding, at top level); 'nextWidth' and
+-- 'nextHeight' size it instead. The wheel scrolls every region under the
+-- pointer, and a thin scrollbar appears when the body is taller than the
+-- region.
 scrollColumn :: ChibiUI model a -> ChibiUI model a
 scrollColumn body = do
-  wid <- nextId
+  (wid, r) <- widgetRect ((\ls -> Size (Layout.remainingWidth ls) (Layout.remainingHeight ls)) <$> readLayout)
   th <- theme
-  winH <- sizeH <$> windowSize
+  parent <- readLayout
   let k = slotOf wid
       scrollKey = slotKey SlotScrollY k
       barW = 4
-  top <- lsLineY <$> readLayout
-  avail <- availWidth
-  let regionH = max 0 (winH - themeWindowPad th - top)
-  r <- place (Size avail regionH)
-  parent <- readLayout
-  recordRect wid r
+
   scroll0 <- storeRead (findSlot fieldFloat 0 scrollKey)
   wheel <- scrollDelta
   hov <- hovered r

@@ -18,6 +18,8 @@ import ChibiUI.Internal.Types
 
 -- | Attach a right-click menu to the preceding widget or group. Actions
 -- should update application state, rather than declare more widgets.
+-- Shift+F10 opens it while a widget inside it is focused; the first menu
+-- declared wins, so a widget's own menu beats its group's.
 contextMenu :: [(Text, ChibiUI model ())] -> ChibiUI model ()
 contextMenu items = do
   wid <- nextId
@@ -32,7 +34,10 @@ openContextMenu wid r items = do
   hov <- hovered r
   focus <- liftIO (readIORef (ctxFocus ctx))
   focusRect <- liftIO (readIORef (ctxRects ctx) >>= \t -> lookupRect t (slotOf focus))
-  let focused = focus == wid || (focus /= noWidget && focusRect == Just r)
+  let within (Rect x y w h) = x >= rectX r && y >= rectY r
+        && x + w <= rectX r + rectW r && y + h <= rectY r + rectH r
+      focused = focus == wid || (focus /= noWidget && maybe False within focusRect)
+
   let keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
   when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $ do
     let position = if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp

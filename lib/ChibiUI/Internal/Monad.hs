@@ -81,6 +81,7 @@ module ChibiUI.Internal.Monad
   , drawImageUV
   -- * Frame control
   , requestFrame
+  , requestFrameAt
   , quitUi
   , registerImage
   , getClipboard
@@ -355,23 +356,23 @@ mouseReleased = releasedIn MouseLeft <$> getInput
 mouseHeld :: ChibiUI model Bool
 mouseHeld = heldIn MouseLeft <$> getInput
 
--- | Whether a key went down this frame. A focused field reads keys for
--- itself, so this reports 'False' while anything has the keyboard.
+-- | Whether a key went down this frame. A focused text field reads keys
+-- for itself, so this reports 'False' while one has the keyboard.
 keyPressed :: Key -> ChibiUI model Bool
-keyPressed k = do
-  inp <- getInput
-  focus <- readFocus
-  pure (focus == noWidget && pressedIn k inp)
+keyPressed k = appKey (pressedIn k)
 
--- | Whether a key is down. Also gated on focus, like 'keyPressed'.
+-- | Whether a key is down. Also gated on typing, like 'keyPressed'.
 keyHeld :: Key -> ChibiUI model Bool
-keyHeld k = do
-  inp <- getInput
-  focus <- readFocus
-  pure (focus == noWidget && heldIn k inp)
+keyHeld k = appKey (heldIn k)
 
--- | An application shortcut, matched exactly. Suppressed while a widget
--- has focus so its editing/navigation shortcuts cannot trigger app actions.
+appKey :: (Input -> Bool) -> ChibiUI model Bool
+appKey test = do
+  ctx <- ask
+  typing <- liftIO (readIORef (ctxTyping ctx))
+  (not typing &&) . test <$> getInput
+
+-- | An application shortcut, matched exactly. Suppressed while a text
+-- field is focused, so its editing shortcuts cannot trigger app actions.
 shortcut :: Modifiers -> Key -> ChibiUI model Bool
 shortcut mods k = do
   inp <- getInput
@@ -467,14 +468,15 @@ blurFocus = do
   liftIO (writeIORef (ctxFocus ctx) noWidget)
 
 -- | Mark a widget placed at @r@ as reachable with Tab, in declaration
--- order, while any of it shows through the clip.
-addFocusable :: WidgetId -> Rect -> ChibiUI model ()
-addFocusable wid r = do
+-- order, while any of it shows through the clip. A widget that takes
+-- typing silences app keys while focused.
+addFocusable :: WidgetId -> Rect -> Bool -> ChibiUI model ()
+addFocusable wid r typing = do
   ctx <- ask
   liftIO $ do
     clip <- currentClip (ctxArena ctx)
     when (rectsOverlap clip r) $
-      modifyIORef' (ctxFocusables ctx) (wid :)
+      modifyIORef' (ctxFocusables ctx) ((wid, typing) :)
 
 -- | Ask for a pointer shape while the pointer is over this widget.
 wantCursor :: UiCursorKind -> ChibiUI model ()
@@ -598,6 +600,13 @@ requestFrame :: ChibiUI model ()
 requestFrame = do
   ctx <- ask
   liftIO (writeIORef (ctxFrameRequest ctx) True)
+
+-- | Ask for a frame once 'uiTime' reaches @t@, as a blink or a timeout
+-- does; the loop sleeps until then unless input comes first.
+requestFrameAt :: Double -> ChibiUI model ()
+requestFrameAt t = do
+  ctx <- ask
+  liftIO (modifyIORef' (ctxWakeAt ctx) (min t))
 
 -- | End the session after this frame.
 quitUi :: ChibiUI model ()

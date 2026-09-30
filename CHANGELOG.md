@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- App keys (`keyPressed`, `keyHeld`, `shortcut`, `primaryShortcut`) are
+  suppressed only while a text field is focused, not while any widget is:
+  a clicked button no longer swallows Ctrl+S. Tables take focus and Tab,
+  and Up/Down move their selection. Shift+F10 opens a `contextMenu` when
+  the focused widget lies inside the widget or group it is attached to;
+  the first menu declared wins. `scrollColumn` fills the rest of its
+  scope's height, so it sizes correctly inside groups, takes `nextHeight`,
+  and nests. Plots draw one quad per pixel column instead of one per pixel
+  of line length.
+
+- Added `requestFrameAt`: ask for a frame once `uiTime` reaches a time. The
+  caret blink uses it, so a focused field wakes the loop twice a second
+  instead of thirty times, and only while the window has focus (new
+  `inputWindowFocused`).
+
+- Draw commands batch by texture alone: quads are already cut to their
+  clip as they are emitted, so `DrawCmd` loses its clip fields and a frame
+  draws in far fewer calls (the demo: 49 to 36). Removed `cursorFallback`
+  and `MouseButtons`' `Semigroup`/`Monoid` instances.
+
 - Added `slider value lo hi`: a horizontal slider you drag or click, with
   Left/Right steps by a tenth of the range while focused. Added `plotLines`:
   a line plot of a list of values, auto-scaled to its lowest and highest

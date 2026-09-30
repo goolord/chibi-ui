@@ -20,10 +20,9 @@ import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
 import ChibiUI.Internal.Types (Rect (..), Size (..))
 
--- | Run one frame: reset the frame state, run the view, then resolve
--- focus (Tab, click-to-unfocus)
--- and snapshot the draw list. The window background is the caller's clear;
--- the view draws everything else.
+-- | Run one frame: reset the frame state, run the view, then resolve focus
+-- (Tab, click-to-unfocus) and snapshot the draw list. The window
+-- background is the caller's clear; the view draws everything else.
 runFrame :: Context model -> Input -> ChibiUI model a -> IO (a, DrawData)
 runFrame ctx inp view = do
   readIORef (ctxRects ctx) >>= clearRectTable
@@ -33,6 +32,7 @@ runFrame ctx inp view = do
   writeIORef (ctxFocusables ctx) []
   writeIORef (ctxCursor ctx) UiCursorDefault
   writeIORef (ctxFrameRequest ctx) False
+  writeIORef (ctxWakeAt ctx) (1 / 0)
   -- Widget ids count from the root again, so the same view derives the
   -- same ids every frame.
   writeIORef (ctxIdPath ctx) initialIdPath
@@ -44,13 +44,14 @@ runFrame ctx inp view = do
   -- Start the cursor at the window's content origin.
   theme0 <- readIORef (ctxTheme ctx)
   let pad = themeWindowPad theme0
-      w = max 0 (sizeW (inputWindowSize inp) - pad * 2)
-  writeIORef (ctxLayout ctx) freshLayout {lsPenX = pad, lsLineY = pad, lsIndent = pad, lsAvailW = w, lsLast = Rect pad pad 0 0}
+      Size winW winH = inputWindowSize inp
+  writeIORef (ctxLayout ctx) freshLayout
+    { lsPenX = pad, lsLineY = pad, lsIndent = pad, lsAvailW = max 0 (winW - pad * 2)
+    , lsBottom = winH - pad, lsLast = Rect pad pad 0 0 }
   focusBefore <- readIORef (ctxFocus ctx)
   blocked <- runChibiUI ctx processPopup
   writeIORef (ctxInputBlocked ctx) blocked
   a <- runChibiUI ctx view
-
   -- The pointer grab outlives the widgets only while a button is held.
   -- Clearing after the view lets the active widget see its release this
   -- frame; a widget that stopped being declared cannot drop it itself.
@@ -59,8 +60,10 @@ runFrame ctx inp view = do
   -- order; a click that no widget answered by claiming focus clears it.
   fs <- reverse <$> readIORef (ctxFocusables ctx)
   focusReq <- readIORef (ctxFocusRequested ctx)
-  modifyIORef' (ctxFocus ctx) (resolveFocus inp blocked focusReq fs)
+  modifyIORef' (ctxFocus ctx) (resolveFocus inp blocked focusReq (map fst fs))
   focusAfter <- readIORef (ctxFocus ctx)
+  writeIORef (ctxTyping ctx) (lookup focusAfter fs == Just True)
+
   -- Focus resolves after painting. Settle the old/new field visuals and
   -- drafts even when the user produces no further native event.
   when (focusAfter /= focusBefore) (writeIORef (ctxFrameRequest ctx) True)

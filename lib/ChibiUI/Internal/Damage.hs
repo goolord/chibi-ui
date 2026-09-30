@@ -5,7 +5,7 @@
 -- canonical layout (four 32-byte vertices, six indices, in order), so the
 -- k-th quad of one frame lines up with the k-th quad of the next; inserted
 -- or removed content shifts the tail, which simply reads as more damage.
--- A frame whose vertices, quad count, and batch clip\/texture sequence all
+-- A frame whose vertices, quad count, and batch texture sequence all
 -- match the previous one is damage-free: it renders to the same pixels, so
 -- the backend can skip it and idle. A few changed quads become damage
 -- rectangles; anything bigger or structurally ambiguous is a full frame.
@@ -60,10 +60,10 @@ data FrameSnapshot = FrameSnapshot
   -- ^ The used prefix of the vertex buffer: quad @k@ lives at byte
     -- @k * 4 * vertexSize@.
   , snapBatches :: ![DrawCmd]
-  -- ^ The frame's commands. Only their clips and textures are compared:
-    -- index ranges shift when quads are inserted or removed, which the quad
-    -- diff already sees; a clip or texture changing in place can repaint
-    -- different pixels over identical geometry and forces a full frame.
+  -- ^ The frame's commands. Only their textures are compared: index
+    -- ranges shift when quads are inserted or removed, which the quad diff
+    -- already sees; a texture changing in place can repaint different
+    -- pixels over identical geometry and forces a full frame.
   }
 
 -- | Bytes per quad: four vertices.
@@ -122,18 +122,14 @@ batchesEq (s : ss) (c : cs) = batchEq s c && batchesEq ss cs
 batchesEq [] [] = True
 batchesEq _ _ = False
 
--- | Whether two batches share clip and texture.
+-- | Whether two batches share a texture.
 batchEq :: DrawCmd -> DrawCmd -> Bool
-batchEq a b =
-  cmdClipX a == cmdClipX b
-    && cmdClipY a == cmdClipY b
-    && cmdClipW a == cmdClipW b
-    && cmdClipH a == cmdClipH b
-    && cmdTextureId a == cmdTextureId b
+batchEq a b = cmdTextureId a == cmdTextureId b
 
 -- | Whether the two batch lists have equal lengths with a batch that
--- changed in place: same structure, different clip or texture somewhere,
--- which can repaint different pixels over identical geometry.
+-- changed in place: same structure, different texture somewhere, which
+-- can repaint different pixels over identical geometry.
+
 batchesInPlace :: [DrawCmd] -> [DrawCmd] -> Bool
 batchesInPlace = walk False
   where

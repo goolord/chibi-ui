@@ -632,9 +632,10 @@ testDamage = do
   -- The hover holds: the next identical frame is damage-free again.
   d3 <- step id
   assert "damage: a held hover settles" (d3 == DamageNone)
-  -- A window resize relayouts everything: back to a full frame.
+  -- A resize that moves nothing leaves the draw list as it was; the
+  -- renderer repaints in full on a framebuffer size change by itself.
   d4 <- step (\i -> i {inputWindowSize = Size 1024 768})
-  assert "damage: a resize is a full frame" (d4 == DamageFull)
+  assert "damage: a resize that moves nothing is damage-free" (d4 == DamageNone)
 
 assert :: String -> Bool -> IO ()
 assert message ok = unless ok (fail message)

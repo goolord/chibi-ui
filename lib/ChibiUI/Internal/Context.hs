@@ -75,9 +75,12 @@ data Context model = Context
   , ctxFocusRequested :: !(IORef Bool)
   -- ^ Whether a widget claimed focus this frame; a click that claims none
   -- clears it.
-  , ctxFocusables :: !(IORef [WidgetId])
+  , ctxFocusables :: !(IORef [(WidgetId, Bool)])
   -- ^ This frame's focusable widget ids, in declaration order (reversed
-  -- while building), for Tab.
+  -- while building), for Tab, each with whether it takes typing.
+  , ctxTyping :: !(IORef Bool)
+  -- ^ Whether the focused widget takes typing, so app keys stand down.
+  -- Settled after each frame's focus resolves.
   , ctxActive :: !(IORef WidgetId)
   -- ^ The widget that grabbed the pointer and has not released it.
   , ctxCursor :: !(IORef UiCursorKind)
@@ -88,6 +91,8 @@ data Context model = Context
   , ctxQuit :: !(IORef Bool)
   , ctxFrameRequest :: !(IORef Bool)
   -- ^ A view asked for another frame; otherwise the loop blocks on input.
+  , ctxWakeAt :: !(IORef Double)
+  -- ^ The earliest 'ctxTime' a view asked for a frame at; infinity for none.
   , ctxArena :: !DrawArena
   , ctxLayout :: !(IORef LayoutState)
   , ctxIdPath :: !(IORef Word64)
@@ -134,11 +139,13 @@ newContext initial = do
   focus <- newIORef noWidget
   focusReq <- newIORef False
   focusables <- newIORef []
+  typing <- newIORef False
   active <- newIORef noWidget
   cursor <- newIORef UiCursorDefault
   time <- newIORef 0
   quit <- newIORef False
   frameReq <- newIORef False
+  wakeAt <- newIORef (1 / 0)
   arena <- newDrawArena
   layout <- newIORef freshLayout
   idPath <- newIORef initialIdPath
@@ -161,11 +168,14 @@ newContext initial = do
       , ctxFocus = focus
       , ctxFocusRequested = focusReq
       , ctxFocusables = focusables
+      , ctxTyping = typing
       , ctxActive = active
       , ctxCursor = cursor
       , ctxTime = time
       , ctxQuit = quit
       , ctxFrameRequest = frameReq
+      , ctxWakeAt = wakeAt
+
        , ctxArena = arena
        , ctxLayout = layout
        , ctxIdPath = idPath
