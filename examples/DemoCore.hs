@@ -18,12 +18,13 @@ data Model = Model
   { name :: !Text
   , count :: !Int
   , temperature :: !Float
+  , volume :: !Float
   , notes :: !Text
   }
 
 -- | The model the demo starts with.
 demoModel :: Model
-demoModel = Model "world" 0 20.5 "Write notes here.\nEnter adds a new line."
+demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line."
 
 demo :: ChibiUI Model ()
 demo = do
@@ -71,6 +72,20 @@ demo = do
     modify (\m -> m {temperature = value})
   labelDim "Drag to select; double-click a word; right-click to edit."
   labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo"
+
+  -- Slider and line plot.
+  row $ do
+    alignTextToFrame
+    label "frequency"
+    sameLine
+    nextWidth 180
+    started <- gets volume
+    v <- slider started 0 1
+    modify (\m -> m {volume = v})
+  vol <- gets volume
+  nextWidth 220
+  nextHeight 80
+  plotLines [sin (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
 
   newline
   let greeting = (\value -> "hello, " <> value <> "!") <$> gets name

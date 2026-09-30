@@ -65,8 +65,10 @@ module ChibiUI
   , textArea
   , intInput
   , floatInput
+  , slider
   , image
   , useImageRgba
+  , plotLines
   , table
   , treeNode
   , separator
@@ -175,9 +177,11 @@ import ChibiUI.Internal.Widgets
   , intInput
   , label
   , labelDim
+  , plotLines
   , selectableText
   , scrollColumn
   , separator
+  , slider
   , table
   , treeNode
   , textInput

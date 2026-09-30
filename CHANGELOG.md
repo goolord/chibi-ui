@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added `slider value lo hi`: a horizontal slider you drag or click, with
+  Left/Right steps by a tenth of the range while focused. Added `plotLines`:
+  a line plot of a list of values, auto-scaled to its lowest and highest
+  samples.
+
 - Text renders like nano-ui's instead of blocky, uneven strokes, and the
   default font size is 16 px, up from 13 (nano-ui's default). Glyph quads
   now land on whole device pixels: the rasterizer bakes each glyph once at

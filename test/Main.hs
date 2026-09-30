@@ -30,8 +30,10 @@ main = do
   testTextAreaPointer
   testTextAreaViewport
   testIntInput
+  testSlider
   testTable
   testRaggedTable
+  testPlotLines
   testLayoutCursor
   testScroll
   testDrawData
@@ -413,6 +415,62 @@ testRaggedTable = do
   assert "table: ragged rows differ from padded rows" (ragged == padded)
   empty <- frame ctx id (table [] [])
   assert "table: empty table has a selection" (empty == Nothing)
+
+-- Dragging, clicking, clamping and keyboard steps all move the value;
+-- release keeps it, and only the focused slider takes arrow keys.
+testSlider :: IO ()
+testSlider = do
+  ctx <- newTestContext
+  ref <- newIORef (30 :: Float)
+  let view = do
+        v0 <- liftIO (readIORef ref)
+        v <- slider v0 0 100
+        liftIO (writeIORef ref v)
+        pure v
+  _ <- frame ctx id view
+  rs <- readRects ctx
+  r <- bigRect rs
+  let cy = rectY r + rectH r / 2
+      atFrac f = at (rectX r + rectW r * f) cy
+  clicked <- frame ctx (atFrac 0.75 . pressLeft) view
+  released <- frame ctx (atFrac 0.75 . releaseLeft) view
+  assert "slider: click did not position the thumb" (abs (clicked - 75) <= 1 && released == clicked)
+  _ <- frame ctx (atFrac 0.5 . pressLeft) view
+  dragged <- frame ctx (atFrac 0.1) view
+  clamped <- frame ctx (at (-40) cy) view
+  settled <- frame ctx (at (-40) cy . releaseLeft) view
+  assert "slider: drag or clamping failed"
+    (abs (dragged - 10) <= 1 && clamped == 0 && settled == 0)
+  _ <- frame ctx (atFrac 0.5 . pressLeft) view
+  _ <- frame ctx (atFrac 0.5 . releaseLeft) view
+  left <- frame ctx (keys [KeyLeft]) view
+  right <- frame ctx (keys [KeyRight]) view
+  idle <- frame ctx id view
+  assert "slider: keyboard steps failed"
+    (abs (left - 40) <= 1 && abs (right - 50) <= 1 && idle == right)
+  -- Unfocused arrows leave the value alone.
+  blurred <- frame ctx (at 500 400 . pressLeft) view
+  outside <- frame ctx (keys [KeyRight] . releaseLeft) view
+  assert "slider: arrows reached an unfocused slider" (blurred == right && outside == right)
+
+-- A wave draws more than a flat line, which draws more than nothing; every
+-- series stays inside the plot's rect.
+testPlotLines :: IO ()
+testPlotLines = do
+  ctx <- newTestContext
+  let draw values = do
+        (_, dd) <- runFrame ctx emptyInput (nextWidth 100 >> nextHeight 50 >> plotLines values)
+        points <- verticesFor dd (const True)
+        r <- bigRect =<< readRects ctx
+        pure (length points, all (inside r) points)
+      wave = [sin (fromIntegral i * 0.5) | i <- [0 .. 39 :: Int]]
+  (waveCount, waveInside) <- draw wave
+  (flatCount, _) <- draw [5, 5, 5]
+  (emptyCount, _) <- draw []
+  (singleCount, _) <- draw [3]
+  assert "plot: wave, flat or empty series drew wrong amounts"
+    (waveCount > flatCount && flatCount > emptyCount && singleCount > emptyCount)
+  assert "plot: geometry escaped its rect" waveInside
 
 testLayoutCursor :: IO ()
 testLayoutCursor = do
@@ -834,6 +892,8 @@ testConstrainedPrimitives = do
   check "button" (nextWidth 12 >> nextHeight 8 >> button "very long caption")
   check "table" (nextWidth 30 >> nextHeight 25 >> table ["first", "second"] [["long cell", "other"]])
   check "image" (nextWidth 30 >> nextHeight 25 >> image 0 200 200)
+  check "slider" (nextWidth 40 >> nextHeight 10 >> slider 30 0 100)
+  check "plot" (nextWidth 30 >> nextHeight 12 >> plotLines [0, 1, 0, -1, 0.5])
   (_, dd) <- runFrame ctx emptyInput (nextWidth 0 >> nextHeight 0 >> image 0 200 200)
   assert "draw: zero-sized image emitted degenerate geometry" (drawVertexCount dd == 0)
 

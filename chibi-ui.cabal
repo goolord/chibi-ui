@@ -7,8 +7,8 @@ description:
     placed at an advancing cursor, and there is no constraint solver. The
     only backend is RGFW with OpenGL 3.2, text is rasterized by the bundled
     RFont (stb_truetype) from an embedded TrueType Inter subset, and the
-    widgets are the primitive ones: text, text and number fields, images,
-    and basic tables.
+    widgets are the primitive ones: text, text and number fields, sliders,
+    line plots, images, and basic tables.
 license:            MIT
 license-file:       LICENSE
 author:             goolord

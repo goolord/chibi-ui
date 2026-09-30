@@ -10,8 +10,10 @@ module ChibiUI.Internal.Widgets
   , textArea
   , intInput
   , floatInput
+  , slider
   , image
   , useImageRgba
+  , plotLines
   , table
   , scrollColumn
   , separator
@@ -179,6 +181,44 @@ fieldSize :: Float -> ChibiUI model Size
 fieldSize width = do
   avail <- availWidth
   pure (Size (min avail width) (lineHeight + fieldPad * 2 + 2))
+
+-- | A horizontal slider for @value@ between @lo@ and @hi@: drag the thumb
+-- or click the track to set it, and Left/Right step a focused slider by a
+-- tenth of the range. Returns the value it now holds.
+slider :: Float -> Float -> Float -> ChibiUI model Float
+slider value lo hi = do
+  (wid, r) <- widgetRect $ do
+    avail <- availWidth
+    pure (Size (min avail 160) (lineHeight + fieldPad * 2 + 2))
+  addFocusable wid
+  th <- theme
+  hov <- hovered r
+  pressed <- mousePressed
+  when (hov && pressed) (void (claimActive wid) >> requestFocus wid)
+  act <- isActive wid
+  held <- mouseHeld
+  focused <- isFocused wid
+  inp <- getInput
+  when (hov || act) (wantCursor UiCursorPointer)
+  let range = hi - lo
+      frac v = if range > 0 then clamp 0 1 ((v - lo) / range) else 0
+      atFrac f = lo + f * range
+      underPointer = clamp 0 1 ((v2X (inputMousePos inp) - rectX r) / max 1 (rectW r))
+      step = range / 10
+      moved
+        | act && held = atFrac underPointer
+        | focused && pressedIn KeyLeft inp = clamp lo hi (value - step)
+        | focused && pressedIn KeyRight inp = clamp lo hi (value + step)
+        | otherwise = value
+      tw = min 8 (max 0 (rectW r))
+      thumbX = rectX r + tw / 2 + frac moved * max 0 (rectW r - tw)
+      cy = rectY r + rectH r / 2
+      thumbH = min 14 (rectH r)
+  fillRectUI (Rect (rectX r) (cy - 2) (rectW r) 4) (themeSurface th)
+  fillRectUI (Rect (rectX r) (cy - 2) (max 0 (thumbX - rectX r)) 4) (themeAccent th)
+  fillRectUI (Rect (thumbX - tw / 2) (cy - thumbH / 2) tw thumbH) (themeText th)
+  when focused (strokeRectUI r 1 (themeAccent th))
+  pure moved
 
 data FieldMode = SingleLine | MultiLine | ReadOnly deriving (Eq)
 
@@ -444,6 +484,51 @@ image img w h = do
 -- the backend uploads it when @version@ changes. Draw it with 'image'.
 useImageRgba :: Int -> Int -> Int -> Int -> BS.ByteString -> ChibiUI model ()
 useImageRgba = registerImage
+
+-- | A line plot of @values@, scaled to fit its lowest and highest samples;
+-- a flat series draws a line across the middle. The plot is at most 220
+-- wide and 80 tall; size it with 'nextWidth' and 'nextHeight'.
+plotLines :: [Float] -> ChibiUI model ()
+plotLines values = do
+  (_, r) <- widgetRect $ do
+    avail <- availWidth
+    pure (Size (min avail 220) 80)
+  th <- theme
+  fillRectUI r (themeSurface th)
+  strokeRectUI r 1 (themeBorder th)
+  let pad = 2
+      inner = Rect (rectX r + pad) (rectY r + pad) (rectW r - pad * 2) (rectH r - pad * 2)
+      n = length values
+      left = rectX inner
+      right = rectX inner + rectW inner
+      midY = rectY inner + rectH inner / 2
+      points
+        | n == 0 = []
+        | n == 1 = [V2 left midY, V2 right midY]
+        | otherwise =
+            let lo = minimum values
+                hi = maximum values
+                range = hi - lo
+                yAt v = rectY inner + rectH inner * (1 - if range > 0 then (v - lo) / range else 0.5)
+                xAt i = left + (right - left) * fromIntegral i / fromIntegral (n - 1)
+             in [V2 (xAt i) (yAt v) | (i, v) <- zip [0 :: Int ..] values]
+  withClip r (drawPolyline (themeAccent th) points)
+
+-- The line as overlapping axis-aligned squares: the draw list and damage
+-- tracking treat every quad as a rectangle, and the squares join smoothly.
+drawPolyline :: Color -> [V2] -> ChibiUI model ()
+drawPolyline col ps = do
+  mapM_ dot ps
+  mapM_ (uncurry link) (zip ps (drop 1 ps))
+  where
+    t = 2 :: Float
+    dot (V2 x y) = fillRectUI (Rect (x - 1) (y - 1) t t) col
+    link (V2 ax ay) (V2 bx by) = do
+      let len = sqrt ((bx - ax) * (bx - ax) + (by - ay) * (by - ay))
+          steps = max 1 (round (len / (t / 2))) :: Int
+      forM_ [1 .. steps - 1] $ \k -> do
+        let f = fromIntegral k / fromIntegral steps
+        dot (V2 (ax + (bx - ax) * f) (ay + (by - ay) * f))
 
 -- | A basic table: a header row, zebra-striped data rows, hover
 -- highlighting, and row selection on click. Returns the selected row
