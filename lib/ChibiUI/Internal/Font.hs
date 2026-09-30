@@ -22,6 +22,7 @@ module ChibiUI.Internal.Font
   , fontAtlasPixels
   , fontScale
   , atlasSize
+  , AtlasChange (..)
   , fontTakeDirty
   ) where
 
@@ -120,7 +121,7 @@ foreign import ccall unsafe "chibi_rfont_atlas_pixels"
   c_atlasPixels :: Ptr () -> IO (Ptr Word8)
 
 foreign import ccall unsafe "chibi_rfont_take_dirty"
-  c_takeDirty :: Ptr () -> IO Int32
+  c_takeDirty :: Ptr () -> Ptr Int32 -> Ptr Int32 -> IO Int32
 
 -- | The chibi_rfont.h ChibiGlyph struct: four i32 atlas coords, then five
 -- floats.
@@ -324,12 +325,28 @@ fontAtlasPixels f = do
 atlasSize :: (Int, Int)
 atlasSize = (atlasWidth, atlasHeight)
 
--- | Whether any glyph has been rasterized since the last call, so the
--- backend should re-upload the atlas.
-fontTakeDirty :: Font -> IO Bool
+-- | What changed in the atlas since the last call.
+data AtlasChange
+  = AtlasClean
+  | AtlasRows !Int !Int
+  -- ^ New glyphs landed in rows @[y0, y1)@; every texel outside them is
+    -- as last taken, so existing glyphs still sample what they did.
+  | AtlasFresh
+  -- ^ A new atlas, after the font loaded or rebuilt at another scale:
+    -- upload all of it.
+
+-- | Take what changed in the atlas since the last call, so the backend
+-- uploads just that.
+fontTakeDirty :: Font -> IO AtlasChange
 fontTakeDirty f = do
   h <- fsHandle <$> readIORef (fState f)
-  if h /= nullPtr
-
-    then (/= 0) <$> c_takeDirty h
-    else pure False
+  if h == nullPtr
+    then pure AtlasClean
+    else allocaBytes 8 $ \p -> do
+      change <- c_takeDirty h p (p `plusPtr` 4)
+      y0 <- peekByteOff p 0 :: IO Int32
+      y1 <- peekByteOff p 4 :: IO Int32
+      pure $ case change of
+        2 -> AtlasFresh
+        1 -> AtlasRows (fromIntegral y0) (fromIntegral y1)
+        _ -> AtlasClean

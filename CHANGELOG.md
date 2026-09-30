@@ -15,6 +15,10 @@
   (`snapshotChangedQuads`); the RGFW renderer re-uploads only those when
   the quad count holds.
 
+- New glyphs upload just the atlas rows they landed in, and no longer
+  force a full repaint: packing only appends, so no existing quad samples
+  different texels. `fontTakeDirty` reports an `AtlasChange`.
+
 - App keys (`keyPressed`, `keyHeld`, `shortcut`, `primaryShortcut`) are
   suppressed only while a text field is focused, not while any widget is:
   a clicked button no longer swallows Ctrl+S. Tables take focus and Tab,

@@ -16,7 +16,8 @@ typedef struct ChibiFont {
     RFont_font* font;
     uint8_t* pixels; /* coverage atlas */
     uint32_t width, height;
-    int dirty;
+    int fresh;              /* no upload has seen this atlas yet */
+    int32_t dirtyY0, dirtyY1; /* rows glyphs were packed into since; empty when y0 >= y1 */
 } ChibiFont;
 
 static RFont_renderer chibi_renderer;
@@ -36,6 +37,7 @@ static size_t chibi_create_atlas(void* ctx, u32 w, u32 h) {
     }
     f->width = w;
     f->height = h;
+    f->fresh = 1;
     return (size_t)f;
 }
 
@@ -75,7 +77,17 @@ static void chibi_bitmap_to_atlas(void* ctx, RFont_texture atlas, u32 aw, u32 ah
             const uint8_t* src = bitmap + (size_t)row * (size_t)iw;
             RFONT_MEMCPY(dst, src, (size_t)iw);
         }
-        f->dirty = 1;
+        {
+            int32_t y0 = (int32_t)*y;
+            int32_t y1 = y0 + ih;
+            if (f->dirtyY0 >= f->dirtyY1) {
+                f->dirtyY0 = y0;
+                f->dirtyY1 = y1;
+            } else {
+                if (y0 < f->dirtyY0) f->dirtyY0 = y0;
+                if (y1 > f->dirtyY1) f->dirtyY1 = y1;
+            }
+        }
     }
     *x += w + 1.0f;
 }
@@ -173,11 +185,15 @@ uint32_t chibi_rfont_atlas_height(void* handle) {
     return f != NULL ? f->height : 0;
 }
 
-int chibi_rfont_take_dirty(void* handle) {
+int chibi_rfont_take_dirty(void* handle, int32_t* y0, int32_t* y1) {
     ChibiFont* f = (ChibiFont*)handle;
-    int was;
+    int change;
     if (f == NULL) return 0;
-    was = f->dirty;
-    f->dirty = 0;
-    return was;
+    change = f->fresh ? 2 : f->dirtyY0 < f->dirtyY1 ? 1 : 0;
+    *y0 = f->dirtyY0;
+    *y1 = f->dirtyY1;
+    f->fresh = 0;
+    f->dirtyY0 = 0;
+    f->dirtyY1 = 0;
+    return change;
 }

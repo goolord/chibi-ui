@@ -45,8 +45,10 @@ uint8_t* chibi_rfont_atlas_pixels(void* font);
 uint32_t chibi_rfont_atlas_width(void* font);
 uint32_t chibi_rfont_atlas_height(void* font);
 
-/* Whether any glyph has been added since the last call, clearing the flag. */
-int chibi_rfont_take_dirty(void* font);
+/* What changed in the atlas since the last call, clearing it: 0 nothing;
+ * 1 rows [*y0, *y1) gained glyphs, and no texel outside them changed; 2 the
+ * atlas is new (the first call on a font), so upload all of it. */
+int chibi_rfont_take_dirty(void* font, int32_t* y0, int32_t* y1);
 
 #ifdef __cplusplus
 }

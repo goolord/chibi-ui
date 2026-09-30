@@ -47,6 +47,9 @@ foreign import ccall unsafe "chibi_ui_gl_destroy"
 foreign import ccall unsafe "chibi_ui_gl_upload_atlas"
   c_uploadAtlas :: Ptr ChibiUiGl -> Ptr Word8 -> Int32 -> Int32 -> IO Int32
 
+foreign import ccall unsafe "chibi_ui_gl_upload_atlas_rows"
+  c_uploadAtlasRows :: Ptr ChibiUiGl -> Ptr Word8 -> Int32 -> Int32 -> Int32 -> IO ()
+
 foreign import ccall unsafe "chibi_ui_gl_upload_image"
   c_uploadImage :: Ptr ChibiUiGl -> Int32 -> Int32 -> Int32 -> Ptr Word8 -> IO Int32
 
@@ -76,8 +79,6 @@ foreign import ccall unsafe "chibi_ui_gl_clear_region"
 -- current.
 data GlRenderer = GlRenderer
   { glHandle :: !(Ptr ChibiUiGl)
-  , glAtlasUploaded :: !(IORef Bool)
-  -- ^ Whether the atlas texture exists yet.
   , glImages :: !(IORef (IM.IntMap Int))
   -- ^ Per image id, the version last uploaded.
   , glVertexCount :: !(IORef Int)
@@ -94,7 +95,7 @@ newGlRenderer = do
   h <- c_create
   when (h == nullPtr) $
     fail "chibi-ui: OpenGL renderer setup failed (needs an OpenGL 3.2 core context)"
-  GlRenderer h <$> newIORef False <*> newIORef IM.empty <*> newIORef (-1) <*> newIORef (0, 0)
+  GlRenderer h <$> newIORef IM.empty <*> newIORef (-1) <*> newIORef (0, 0)
 
 -- | Release the GPU objects (the context must still be current).
 freeGlRenderer :: GlRenderer -> IO ()
@@ -104,8 +105,9 @@ freeGlRenderer r = c_destroy (glHandle r)
 -- back buffer; the caller swaps. @scale@ is device pixels per logical
 -- pixel and must match the scale the font rasterizes at. The @damage@ the
 -- caller tracked against the last frame decides the work: nothing, the
--- damaged rectangles, or everything. New texture contents (atlas glyphs or
--- image versions) and a framebuffer size change repaint in full. @changed@
+-- damaged rectangles, or everything. A new atlas, new image versions and a
+-- framebuffer size change repaint in full; glyphs added to the atlas do
+-- not, as they only fill texels no quad sampled before. @changed@
 -- lists the quads that differ from the last frame drawn, when the quad
 -- count held ('snapshotChangedQuads'); only those are uploaded.
 renderFrameGl :: GlRenderer -> Font -> IM.IntMap ImageEntry -> Float -> Int -> Int -> Color -> DrawData -> Damage -> Maybe [Int] -> IO ()
@@ -178,22 +180,23 @@ drawDamaged h !scale !fbW !fbH drawData rects bgR bgG bgB = do
 readRetainedPixels :: GlRenderer -> Int -> Int -> IO BS.ByteString
 readRetainedPixels r w h = BSI.create (w * h * 4) (c_readRetained (glHandle r))
 
--- | Upload the font's coverage atlas the first time, and again whenever
--- glyphs were added since the last sync. Reports whether the texture
--- changed, so callers can repaint in full: baked glyph positions may have
--- moved.
+-- | Upload what changed in the font's coverage atlas: all of a new one,
+-- or the rows new glyphs landed in. Reports whether the atlas is new, so
+-- callers repaint in full: every glyph moved.
 syncFontAtlasGl :: GlRenderer -> Font -> IO Bool
 syncFontAtlasGl r font = do
-  dirty <- fontTakeDirty font
-  uploaded <- readIORef (glAtlasUploaded r)
-  if uploaded && not dirty
-    then pure False
-    else do
-      let (w, h) = atlasSize
+  change <- fontTakeDirty font
+  let (w, h) = atlasSize
+  case change of
+    AtlasClean -> pure False
+    AtlasRows y0 y1 -> do
       pixels <- fontAtlasPixels font
-      ok <- (/= 0) <$> c_uploadAtlas (glHandle r) pixels (fromIntegral w) (fromIntegral h)
-      when ok (writeIORef (glAtlasUploaded r) True)
-      pure ok
+      when (pixels /= nullPtr) $
+        c_uploadAtlasRows (glHandle r) pixels (fromIntegral w) (fromIntegral y0) (fromIntegral y1)
+      pure False
+    AtlasFresh -> do
+      pixels <- fontAtlasPixels font
+      (/= 0) <$> c_uploadAtlas (glHandle r) pixels (fromIntegral w) (fromIntegral h)
 
 -- | Upload registered images whose version changed since the last sync.
 -- Reports whether any texture changed, so callers can repaint in full: the

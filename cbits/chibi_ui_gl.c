@@ -127,6 +127,7 @@ typedef intptr_t GLsizeiptr;
   X(void, ActiveTexture, (GLenum))                                                                  \
   X(void, TexParameteri, (GLenum, GLenum, GLint))                                                   \
   X(void, TexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*)) \
+  X(void, TexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*)) \
   X(void, DeleteTextures, (GLsizei, const GLuint*))                                                \
   X(void, ReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*))                     \
   X(void, GenFramebuffers, (GLsizei, GLuint*))                                                     \
@@ -354,6 +355,18 @@ int32_t chibi_ui_gl_upload_atlas(chibi_ui_gl* r, const uint8_t* pixels, int32_t 
   gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
   gl->TexImage2D(GL_TEXTURE_2D, 0, GL_R8, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, pixels);
   return 1;
+}
+
+/* Replace rows [y0, y1) of the glyph atlas from the font shim's atlas of
+ * atlasW-wide coverage rows, after chibi_ui_gl_upload_atlas made it. */
+void chibi_ui_gl_upload_atlas_rows(chibi_ui_gl* r, const uint8_t* pixels, int32_t w, int32_t y0,
+                                   int32_t y1) {
+  ngl_api* gl = &r->gl;
+  if (pixels == NULL || y1 <= y0) return;
+  gl->BindTexture(GL_TEXTURE_2D, r->atlas);
+  gl->PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  gl->TexSubImage2D(GL_TEXTURE_2D, 0, 0, y0, w, y1 - y0, GL_RED, GL_UNSIGNED_BYTE,
+                    pixels + (size_t)y0 * (size_t)w);
 }
 
 /* Upload or replace a registered image's texture. Pixels are w x h RGBA,
