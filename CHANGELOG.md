@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `radio options value`: a row of boxes, one per option, that
+  chooses the one clicked.
+
 - Added `checkbox caption value`: a box that a click, or Enter/Space
   while focused, flips.
 

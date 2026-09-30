@@ -62,6 +62,7 @@ module ChibiUI
   , selectableText
   , button
   , checkbox
+  , radio
   , textInput
   , textArea
   , intInput
@@ -175,6 +176,7 @@ import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))
 import ChibiUI.Internal.Widgets
   ( button
   , checkbox
+  , radio
   , floatInput
   , image
   , intInput

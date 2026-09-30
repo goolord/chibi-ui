@@ -21,11 +21,15 @@ data Model = Model
   , volume :: !Float
   , notes :: !Text
   , showPlot :: !Bool
+  , wave :: !Wave
   }
+
+data Wave = Sine | Saw
+  deriving (Eq)
 
 -- | The model the demo starts with.
 demoModel :: Model
-demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True
+demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine
 
 demo :: ChibiUI Model ()
 demo = do
@@ -81,10 +85,15 @@ demo = do
   shown <- checkbox "show plot" =<< gets showPlot
   modify (\m -> m {showPlot = shown})
   vol <- gets volume
+  shape <- radio [("sine", Sine), ("saw", Saw)] =<< gets wave
+  modify (\m -> m {wave = shape})
+  let sample x = case shape of
+        Sine -> sin x
+        Saw -> x / pi - 2 * fromIntegral (floor (x / (2 * pi)) :: Int)
   when shown $ do
     nextWidth 220
     nextHeight 80
-    plotLines [sin (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
+    plotLines [sample (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
 
   newline
   let greeting = (\value -> "hello, " <> value <> "!") <$> gets name
