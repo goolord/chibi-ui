@@ -23,6 +23,7 @@ data Model = Model
   , showPlot :: !Bool
   , wave :: !Wave
   , salutation :: !Text
+  , tab :: !Int
   }
 
 data Wave = Sine | Saw
@@ -30,7 +31,7 @@ data Wave = Sine | Saw
 
 -- | The model the demo starts with.
 demoModel :: Model
-demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine "hello"
+demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine "hello" 0
 
 demo :: ChibiUI Model ()
 demo = do
@@ -114,24 +115,26 @@ demo = do
 
   space 4
 
-  -- Table with row selection.
-  picked <- table ["name", "age"] [["ada", "36"], ["grace", "45"], ["edsger", "72"]]
-  newline
-  labelDim (case picked of
-              Just i -> "selected row " <> T.pack (show (i :: Int))
-              Nothing -> "no row selected")
-
-  space 4
-  treeNode "Project" $ do
-    treeNode "Sources" $ do
-      selectableText "Main.hs"
-      selectableText "Widgets.hs"
-    selectableText "README.md"
-
-  space 4
-  labelDim "notes:"
-  editedNotes <- textArea =<< gets notes
-  modify (\m -> m {notes = editedNotes})
+  -- Tabs pick which page shows below them; each page is one keyed group.
+  page <- tabs ["table", "tree", "notes"] =<< gets tab
+  modify (\m -> m {tab = page})
+  column $ case page of
+    0 -> withKey "table" $ do
+      -- Table with row selection.
+      picked <- table ["name", "age"] [["ada", "36"], ["grace", "45"], ["edsger", "72"]]
+      newline
+      labelDim (case picked of
+                  Just i -> "selected row " <> T.pack (show (i :: Int))
+                  Nothing -> "no row selected")
+    1 -> withKey "tree" $
+      treeNode "Project" $ do
+        treeNode "Sources" $ do
+          selectableText "Main.hs"
+          selectableText "Widgets.hs"
+        selectableText "README.md"
+    _ -> withKey "notes" $ do
+      editedNotes <- textArea =<< gets notes
+      modify (\m -> m {notes = editedNotes})
 
   space 4
   labelDim "scrolled rows:"

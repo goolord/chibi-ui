@@ -8,6 +8,7 @@ module ChibiUI.Internal.Widgets
   , checkbox
   , radio
   , combo
+  , tabs
   , treeNode
   , textInput
   , textArea
@@ -66,14 +67,16 @@ widgetRect measure = do
 -- while keyboard-focused.
 button :: Text -> ChibiUI model Bool
 button t = do
-  (_, r, i) <- interactive clickable $ do
-    Size w h <- textSize t
-    pure (Size (w + widgetPad * 2) (h + widgetPad * 2))
+  (_, r, i) <- interactive clickable (paddedText t)
   th <- theme
   fillRectUI r (surfaceFor th i)
   frameBorder th r (iFocused i)
   textInRect r t (themeText th)
   pure (iClicked i)
+
+-- | A line of text and a widget's padding around it.
+paddedText :: Text -> ChibiUI model Size
+paddedText t = (\(Size w h) -> Size (w + widgetPad * 2) (h + widgetPad * 2)) <$> textSize t
 
 -- | A box with a caption beside it. Click it, or press Enter/Space while
 -- it is focused, to flip it; returns the value it now holds.
@@ -89,10 +92,29 @@ radio options value = row $ do
   clicks <- forM options $ \(t, x) -> do
     clicked <- markBox t (const (x == value))
     pure (if clicked then Just x else Nothing)
-  case msum clicks of
-    -- Options before the chosen one drew already: show them next frame.
-    Just x | x /= value -> x <$ requestFrame
-    _ -> pure value
+  chooseOne value clicks
+
+-- | A row of tab headers, the @selected@ one underlined: click a header, or
+-- press Enter/Space while it is focused, to select it. Returns the index
+-- now selected, for the caller to show that page below.
+tabs :: [Text] -> Int -> ChibiUI model Int
+tabs titles selected = row $ do
+  clicks <- forM (zip [0 ..] titles) $ \(k, t) -> do
+    (_, r, i) <- interactive clickable (paddedText t)
+    th <- theme
+    when (iHovered i || iActive i) (fillRectUI r (surfaceFor th i))
+    focusRing th r (iFocused i)
+    textInRect r t (if k == selected then themeText th else themeTextDim th)
+    when (k == selected) (fillRectUI (r {rectY = rectY r + rectH r - 2, rectH = 2}) (themeAccent th))
+    pure (if iClicked i then Just k else Nothing)
+  chooseOne selected clicks
+
+-- | What a run of options chose this frame, or @current@. The options
+-- before the chosen one drew already, so ask for a frame to show them.
+chooseOne :: Eq a => a -> [Maybe a] -> ChibiUI model a
+chooseOne current clicks = case msum clicks of
+  Just x | x /= current -> x <$ requestFrame
+  _ -> pure current
 
 -- | A field showing the chosen option's caption: click it, or press
 -- Enter/Space while it is focused, for a menu of the options. Returns the
