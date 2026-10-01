@@ -31,6 +31,7 @@ import Data.List (find, transpose)
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Numeric (showFFloat)
 import Text.Read (readMaybe)
 import ChibiUI.Internal.Draw (emitQuadUV, fillRect, texImage)
 import ChibiUI.Internal.Font (lineHeight)
@@ -317,30 +318,40 @@ cappedSize w h = (\avail -> Size (min avail w) h) <$> availWidth
 
 -- | A horizontal slider for @value@ between @lo@ and @hi@: drag the thumb
 -- or click the track to set it, and Left/Right step a focused slider by a
--- tenth of the range. Returns the value it now holds.
+-- tenth of the range. The value shows to two places at the right end.
+-- Returns the value it now holds.
 slider :: Float -> Float -> Float -> ChibiUI model Float
 slider value lo hi = do
   (_, r, i) <- interactive clickable (fieldSize 160)
   th <- theme
+  -- The value's room fits the wider of the range's ends.
+  valueW <- maximum <$> mapM (measureText . twoPlaces) [lo, hi]
   let inp = iInput i
+      track = r {rectW = max 0 (rectW r - valueW - widgetPad)}
       range = hi - lo
       frac v = if range > 0 then clamp01 ((v - lo) / range) else 0
       atFrac f = lo + f * range
-      underPointer = clamp01 ((v2X (inputMousePos inp) - rectX r) / max 1 (rectW r))
+      underPointer = clamp01 ((v2X (inputMousePos inp) - rectX track) / max 1 (rectW track))
       step = range / 10
       moved
         | iActive i && heldIn MouseLeft inp = atFrac underPointer
         | Just d <- focusedKey i [(KeyLeft, -step), (KeyRight, step)] = clamp lo hi (value + d)
         | otherwise = value
-      tw = min 8 (max 0 (rectW r))
-      thumbX = rectX r + tw / 2 + frac moved * max 0 (rectW r - tw)
+      tw = min 8 (max 0 (rectW track))
+      thumbX = rectX track + tw / 2 + frac moved * max 0 (rectW track - tw)
       cy = rectY r + rectH r / 2
       thumbH = min 14 (rectH r)
-  fillRectUI (Rect (rectX r) (cy - 2) (rectW r) 4) (themeSurface th)
-  fillRectUI (Rect (rectX r) (cy - 2) (max 0 (thumbX - rectX r)) 4) (themeAccent th)
+  fillRectUI (Rect (rectX track) (cy - 2) (rectW track) 4) (themeSurface th)
+  fillRectUI (Rect (rectX track) (cy - 2) (max 0 (thumbX - rectX track)) 4) (themeAccent th)
   fillRectUI (Rect (thumbX - tw / 2) (cy - thumbH / 2) tw thumbH) (themeText th)
+  let valueX = rectX track + rectW track + widgetPad
+  drawTextIn (r {rectX = valueX, rectW = max 0 (rectX r + rectW r - valueX)}) (twoPlaces moved) (themeText th)
   focusRing th r (iFocused i)
   pure moved
+
+-- | A number to two decimal places.
+twoPlaces :: Float -> Text
+twoPlaces x = T.pack (showFFloat (Just 2) x "")
 
 -- | A bar filled @fraction@ of the way across, for 0 to 1: at most 160
 -- wide, like 'slider'.

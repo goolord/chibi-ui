@@ -441,8 +441,11 @@ testSlider = do
   _ <- frame ctx id view
   rs <- readRects ctx
   r <- bigRect rs
+  -- The track ends where the value's room, sized for the wider end, begins.
+  valueW <- runChibiUI ctx (max <$> measureText "0.00" <*> measureText "100.00")
   let cy = rectY r + rectH r / 2
-      atFrac f = at (rectX r + rectW r * f) cy
+      trackW = rectW r - valueW - 6
+      atFrac f = at (rectX r + trackW * f) cy
   clicked <- frame ctx (atFrac 0.75 . pressLeft) view
   released <- frame ctx (atFrac 0.75 . releaseLeft) view
   assert "slider: click did not position the thumb" (abs (clicked - 75) <= 1 && released == clicked)

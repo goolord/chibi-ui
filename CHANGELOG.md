@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `slider` shows its value to two places at its right end; the track
+  shortens to make room for the wider of the range's ends.
+
 - Added `separatorText caption`: a dimmed caption with a rule across the
   rest of the line, to head a section.
 
