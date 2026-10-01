@@ -5,7 +5,7 @@ module ChibiUI.Internal.Menu
   , tooltip, paintTooltip
   ) where
 
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, unless, when)
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import ChibiUI.Internal.Context (Context (..), Popup (..), noWidget)
@@ -55,13 +55,15 @@ paintTooltip = do
 -- | Attach a right-click menu to the preceding widget or group. Actions
 -- should update application state, rather than declare more widgets.
 -- Shift+F10 opens it while a widget inside it is focused; the first menu
--- declared wins, so a widget's own menu beats its group's.
+-- declared wins, so a widget's own menu beats its group's. A 'disabled'
+-- menu never opens.
 contextMenu :: [(Text, ChibiUI model ())] -> ChibiUI model ()
 contextMenu items = do
   wid <- nextId
   r <- itemRect
   recordRect wid r
-  openContextMenu wid r [(t, True, action) | (t, action) <- items]
+  off <- isDisabled
+  unless off (openContextMenu wid r [(t, True, action) | (t, action) <- items])
 
 openContextMenu :: WidgetId -> Rect -> [(Text, Bool, ChibiUI model ())] -> ChibiUI model ()
 openContextMenu wid r items = do

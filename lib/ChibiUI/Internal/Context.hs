@@ -68,6 +68,8 @@ data Context model = Context
   , ctxTooltip :: !(IORef (Maybe (V2, Text)))
   -- ^ The tooltip to paint over this frame, and the pointer it follows.
   , ctxInputBlocked :: !(IORef Bool)
+  , ctxDisabled :: !(IORef Bool)
+  -- ^ Whether widgets declared now ignore the pointer and keyboard.
   , ctxTheme :: !(IORef Theme)
   , ctxInput :: !(IORef Input)
   , ctxStore :: !(IORef WidgetStore)
@@ -143,6 +145,7 @@ newContext initial = do
   ctxPopup <- newIORef Nothing
   ctxTooltip <- newIORef Nothing
   ctxInputBlocked <- newIORef False
+  ctxDisabled <- newIORef False
   ctxTheme <- newIORef defaultTheme
   ctxInput <- newIORef emptyInput
   ctxStore <- newIORef emptyWidgetStore

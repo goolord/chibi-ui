@@ -24,6 +24,7 @@ data Model = Model
   , wave :: !Wave
   , salutation :: !Text
   , tab :: !Int
+  , locked :: !Bool
   }
 
 data Wave = Sine | Saw
@@ -31,7 +32,7 @@ data Wave = Sine | Saw
 
 -- | The model the demo starts with.
 demoModel :: Model
-demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine "hello" 0
+demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine "hello" 0 False
 
 demo :: ChibiUI Model ()
 demo = do
@@ -54,11 +55,15 @@ demo = do
 
   -- Buttons and state. Inside a row, children flow left to right.
   row $ do
-    minus <- button "-"
-    when minus (modify (\m -> m {count = count m - 1}))
-    label . T.pack . show =<< gets count
-    plus <- button "+"
-    when plus (modify (\m -> m {count = count m + 1}))
+    isLocked <- gets locked
+    disabled isLocked $ do
+      minus <- button "-"
+      when minus (modify (\m -> m {count = count m - 1}))
+      label . T.pack . show =<< gets count
+      plus <- button "+"
+      when plus (modify (\m -> m {count = count m + 1}))
+    lock <- checkbox "lock" isLocked
+    modify (\m -> m {locked = lock})
 
   space 4
 

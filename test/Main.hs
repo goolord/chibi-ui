@@ -37,6 +37,7 @@ main = do
   testTabs
   testLastItem
   testTooltip
+  testDisabled
   testTable
   testRaggedTable
   testPlotLines
@@ -571,6 +572,27 @@ testTooltip = do
   gone <- quads (at 500 400)
   assert ("tooltip: wrong quads: " ++ show (plain, early, shown, gone))
     (early == plain && shown > plain && gone == plain)
+
+-- A disabled button neither clicks nor takes focus, by pointer or Tab;
+-- enabled again, it does both.
+testDisabled :: IO ()
+testDisabled = do
+  ctx <- newTestContext
+  off <- newIORef True
+  let view = do
+        d <- liftIO (readIORef off)
+        clicked <- disabled d (button "go")
+        focused <- itemFocused
+        pure (clicked, focused)
+  _ <- frame ctx id view
+  r <- bigRect =<< readRects ctx
+  (offClick, _) <- clickIn ctx r view
+  (_, offTab) <- frame ctx (keys [KeyTab]) view >> frame ctx id view
+  writeIORef off False
+  (onClick, _) <- clickIn ctx r view
+  (_, onFocus) <- frame ctx id view
+  assert "disabled: button reacted while disabled, or not once enabled"
+    (not offClick && not offTab && onClick && onFocus)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.
