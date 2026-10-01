@@ -62,7 +62,7 @@ demo = do
       when plus (modify (\m -> m {count = count m + 1}))
     edit locked (\v m -> m {locked = v}) (checkbox "lock")
 
-  space 4
+  separatorText "fields"
 
   -- Text and number fields. 'edit' shows part of the model in a widget
   -- and keeps what the widget returns.
