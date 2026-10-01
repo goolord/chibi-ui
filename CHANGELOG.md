@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Nested scroll regions: the wheel scrolls the innermost `scrollColumn` or
+  `textArea` under the pointer, and the region around it once that one
+  reaches its end. Before, it scrolled every region under the pointer.
+
+- A full-width `scrollColumn` at top level reaches out over the window
+  padding on the sides it touches: its scrollbar sits at the window's edge
+  and its body scrolls up to the edge, with the padding inside it.
+
 - Added `debugOverlay`: called last in a view, it outlines every widget
   placed this frame, labels the one under the pointer with its rect, and
   counts the frame's widgets and quads in the top-right corner. The demo

@@ -12,6 +12,7 @@ module ChibiUI.Internal.Monad
   , runChibiUI
   , readCtx
   , writeCtx
+  , modifyCtx
   , liftIO
   -- * Widget identity
   , nextId

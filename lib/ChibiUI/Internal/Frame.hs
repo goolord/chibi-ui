@@ -7,9 +7,11 @@ module ChibiUI.Internal.Frame
 import Control.Monad (unless, when)
 import Data.IORef
 import Data.List (elemIndex)
+import Data.Foldable (minimumBy)
 import Data.Maybe (fromMaybe)
+import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
-import ChibiUI.Internal.Context (Context (..), Wake (..), noWidget)
+import ChibiUI.Internal.Context (Context (..), ScrollTarget (..), Wake (..), noWidget)
 import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Id (WidgetId, initialIdPath)
 import ChibiUI.Internal.Input
@@ -18,7 +20,7 @@ import ChibiUI.Internal.Menu (processPopup, paintPopup, paintTooltip)
 import ChibiUI.Internal.Layout (beginViewport)
 import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
-import ChibiUI.Internal.Types (Rect (..), Size (..), rectInflate)
+import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectHit, rectInflate)
 
 -- | Run one frame: reset the frame state, run the view, then resolve focus
 -- (Tab, click-to-unfocus) and snapshot the draw list. The window
@@ -49,6 +51,11 @@ runFrame ctx inp view = do
   focusBefore <- readIORef (ctxFocus ctx)
   blocked <- runChibiUI ctx processPopup
   writeIORef (ctxInputBlocked ctx) blocked
+  -- The wheel goes to a region last frame declared; this frame's declare
+  -- themselves afresh.
+  targets <- readIORef (ctxScrollTargets ctx)
+  writeIORef (ctxScrollTargets ctx) []
+  writeIORef (ctxWheelOwner ctx) (if blocked then noWidget else wheelOwner inp targets)
   a <- runChibiUI ctx view
   -- The pointer grab outlives the widgets only while a button is held.
   -- Clearing after the view lets the active widget see its release this
@@ -69,6 +76,20 @@ runFrame ctx inp view = do
     paintTooltip >> paintPopup inp
   dd <- finishFrame (ctxArena ctx)
   pure (a, dd)
+
+-- | The region this frame's wheel scrolls: the innermost one under the
+-- pointer that can still move the wheel's way, so a region at its end
+-- hands the wheel to the one around it. A nested region shows through its
+-- parent's clip, so the innermost under the pointer is the smallest.
+wheelOwner :: Input -> [ScrollTarget] -> WidgetId
+wheelOwner inp targets = case [(rectW s * rectH s, wid) | ScrollTarget wid s o m <- targets, takes s o m] of
+  [] -> noWidget
+  takers -> snd (minimumBy (comparing fst) takers)
+  where
+    V2 dx dy = inputScroll inp
+    takes shown (V2 x y) (V2 maxX maxY) =
+      rectHit shown (inputMousePos inp)
+        && ((dx < 0 && x > 0) || (dx > 0 && x < maxX) || (dy < 0 && y > 0) || (dy > 0 && y < maxY))
 
 -- | Outside clicks win over Tab; blocked input still drops vanished widgets.
 resolveFocus :: Input -> Bool -> Bool -> [WidgetId] -> WidgetId -> WidgetId

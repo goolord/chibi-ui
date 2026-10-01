@@ -51,6 +51,7 @@ main = do
   testPlotLines
   testLayoutCursor
   testScroll
+  testNestedScroll
   testDrawData
   testDamage
   testFontScales
@@ -801,20 +802,25 @@ testScroll = do
       step = 3 * 16 -- three line heights
   _ <- frame ctx (\i -> (at cx cy i) {inputScroll = V2 0 1}) view
   top1 <- childTops
-  unless (top0 == rectY r) (fail ("scroll: first child not at region top: " ++ show top0))
-  unless (top1 == rectY r - step) (fail ("scroll: expected the body to shift up " ++ show step ++ ", moved to " ++ show top1))
+  -- A full-window region reaches the window's edges and keeps the padding
+  -- inside, above its body.
+  pad <- themeWindowPad <$> runChibiUI ctx theme
+  let origin = rectY r + pad
+  unless (rectY r == 0 && rectX r == 0) (fail ("scroll: top-level region kept the window padding: " ++ show r))
+  unless (top0 == origin) (fail ("scroll: first child not at the region's padded top: " ++ show top0))
+  unless (top1 == origin - step) (fail ("scroll: expected the body to shift up " ++ show step ++ ", moved to " ++ show top1))
   -- Wheeling back up clamps at zero.
   _ <- frame ctx (\i -> (at cx cy i) {inputScroll = V2 0 (-5)}) view
   _ <- frame ctx id view
   top2 <- childTops
-  unless (top2 == rectY r) (fail ("scroll: did not clamp back to the top: " ++ show top2))
+  unless (top2 == origin) (fail ("scroll: did not clamp back to the top: " ++ show top2))
   -- Pressing the track's bottom brings the thumb there: fully scrolled,
   -- so the wheel moves the body no further.
   let barX = rectX r + rectW r - 2
       bottom = rectY r + rectH r - 1
   _ <- frame ctx (at barX bottom . pressLeft) view
   top3 <- childTops
-  unless (top3 < rectY r) (fail ("scroll: track press did not scroll: " ++ show top3))
+  unless (top3 < origin) (fail ("scroll: track press did not scroll: " ++ show top3))
   _ <- frame ctx (\i -> (at barX bottom i) {inputScroll = V2 0 1}) view
   top4 <- childTops
   unless (top4 == top3) (fail ("scroll: track press did not reach the end: " ++ show (top3, top4)))
@@ -822,15 +828,52 @@ testScroll = do
   -- dragging above the region clamps at the top.
   _ <- frame ctx (at cx (rectY r + rectH r / 2)) view
   top5 <- childTops
-  unless (top3 < top5 && top5 < rectY r) (fail ("scroll: drag to the middle landed at " ++ show top5))
+  unless (top3 < top5 && top5 < origin) (fail ("scroll: drag to the middle landed at " ++ show top5))
   _ <- frame ctx (at cx (rectY r - 100)) view
   _ <- frame ctx (at cx (rectY r - 100) . releaseLeft) view
   top6 <- childTops
-  unless (top6 == rectY r) (fail ("scroll: drag to the top landed at " ++ show top6))
+  unless (top6 == origin) (fail ("scroll: drag to the top landed at " ++ show top6))
   -- Released, the pointer moving over the bar no longer scrolls.
   _ <- frame ctx (at barX bottom) view
   top7 <- childTops
-  unless (top7 == rectY r) (fail ("scroll: released drag still scrolled: " ++ show top7))
+  unless (top7 == origin) (fail ("scroll: released drag still scrolled: " ++ show top7))
+
+-- | The wheel scrolls the innermost region under the pointer, and the one
+-- around it once the inner region reaches its end.
+testNestedScroll :: IO ()
+testNestedScroll = do
+  ctx <- newTestContext
+  let rows prefix n = mapM_ (label . (prefix <>) . T.pack . show) [1 .. n :: Int]
+      view = scrollColumn $ do
+        rows "above " 5
+        nextHeight 60
+        scrollColumn (rows "inner " 20)
+        rows "below " 40
+      innerRegion = do
+        rs <- readRects ctx
+        case [r | r <- rs, rectH r == 60] of
+          [r] -> pure r
+          _ -> fail "nested scroll: inner region not found"
+      wheel n r = frame ctx (\i -> (at (rectX r + 20) (rectY r + 20) i) {inputScroll = V2 0 n}) view
+      step = 3 * 16 -- three line heights
+  _ <- frame ctx id view
+  inner0 <- innerRegion
+  before <- frameRects ctx
+  _ <- wheel 1 inner0
+  after <- frameRects ctx
+  let moved = [(r0, r1) | (k, r0) <- before, Just r1 <- [lookup k after], r0 /= r1]
+  assert ("nested scroll: the wheel moved more than the inner body: " ++ show (length moved))
+    (length moved == 20)
+  assert "nested scroll: the inner body did not move by one step"
+    (all (\(r0, r1) -> rectY r1 == rectY r0 - step) moved)
+  -- At its end, the inner region hands the wheel to the outer one.
+  _ <- wheel 100 inner0
+  inner1 <- innerRegion
+  assert "nested scroll: the outer region moved with the inner one" (inner1 == inner0)
+  _ <- wheel 1 inner1
+  inner2 <- innerRegion
+  assert ("nested scroll: the outer region did not take the wheel: " ++ show (inner1, inner2))
+    (rectY inner2 == rectY inner1 - step)
 
 -- | Fonts survive the session's startup sequence (a second font replacing
 -- the context's) and scale changes rebuild cleanly. A regression here once
