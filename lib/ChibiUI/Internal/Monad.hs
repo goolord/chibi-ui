@@ -71,6 +71,11 @@ module ChibiUI.Internal.Monad
   , wantCursor
   , recordRect
   , lookupWidgetRect
+  -- * Last item
+  , itemRect
+  , itemHovered
+  , itemFocused
+  , itemActive
   -- * Drawing
   , theme
   , withTheme
@@ -491,6 +496,31 @@ lookupWidgetRect :: WidgetId -> ChibiUI model (Maybe Rect)
 lookupWidgetRect wid = do
   rects <- readCtx ctxRects
   liftIO (lookupRect rects (slotOf wid))
+
+-- | The rect of the widget or group placed last.
+itemRect :: ChibiUI model Rect
+itemRect = Layout.lsLast <$> readLayout
+
+-- | Whether the pointer is over the widget or group placed last.
+itemHovered :: ChibiUI model Bool
+itemHovered = itemRect >>= hovered
+
+-- | Whether the focused widget lies within the widget or group placed last.
+itemFocused :: ChibiUI model Bool
+itemFocused = itemHolds ctxFocus
+
+-- | Whether the widget holding the pointer grab lies within the widget or
+-- group placed last: it is being pressed or dragged.
+itemActive :: ChibiUI model Bool
+itemActive = itemHolds ctxActive
+
+-- | Whether the widget one of the context's references names lies within
+-- the last item.
+itemHolds :: (Context model -> IORef WidgetId) -> ChibiUI model Bool
+itemHolds field = do
+  wid <- readCtx field
+  r <- itemRect
+  if wid == noWidget then pure False else maybe False (rectContains r) <$> lookupWidgetRect wid
 
 -- | The theme, for colours and spacing.
 theme :: ChibiUI model Theme
