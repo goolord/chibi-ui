@@ -156,15 +156,8 @@ quadRuns = foldr step []
 drawCmd :: Ptr ChibiUiGl -> (Int, Int, Int, Int) -> DrawCmd -> IO ()
 drawCmd h (x0, y0, x1, y1) cmd =
   when (cmdQuadCount cmd > 0) $
-    c_drawGeometry
-      h
-      (fromIntegral x0)
-      (fromIntegral y0)
-      (fromIntegral x1)
-      (fromIntegral y1)
-      (cmdFirstQuad cmd)
-      (cmdQuadCount cmd)
-      (fromIntegral (cmdTextureId cmd))
+    c_drawGeometry h (fromIntegral x0) (fromIntegral y0) (fromIntegral x1) (fromIntegral y1)
+      (cmdFirstQuad cmd) (cmdQuadCount cmd) (fromIntegral (cmdTextureId cmd))
 
 -- | Clear the damaged rectangles, then redraw every command scissored to
 -- each, into the still-retained pixels around it. Flat shapes and text
@@ -206,24 +199,12 @@ syncFontAtlasGl r font = do
 uploadImagesGl :: GlRenderer -> IM.IntMap ImageEntry -> IO Bool
 uploadImagesGl r images = do
   uploaded <- readIORef (glImages r)
-  let changed =
-        [ (img, e)
-        | (img, e) <- IM.toList images
-        , IM.lookup img uploaded /= Just (ieVersion e)
-        ]
-  oks <- forM changed $ \(img, e) ->
-    BSU.unsafeUseAsCString (iePixels e) $ \p -> do
-      ok <-
-        c_uploadImage
-          (glHandle r)
-          (fromIntegral img)
-          (fromIntegral (ieWidth e))
-          (fromIntegral (ieHeight e))
-          (castPtr p)
-      pure (ok /= 0)
+  let changed = IM.differenceWith (\e v -> if v == ieVersion e then Nothing else Just e) images uploaded
+  oks <- forM (IM.toList changed) $ \(img, e) ->
+    BSU.unsafeUseAsCString (iePixels e) $ \p ->
+      (/= 0) <$> c_uploadImage (glHandle r) (fromIntegral img) (fromIntegral (ieWidth e)) (fromIntegral (ieHeight e)) (castPtr p)
   -- Unchanged frames, the common case, leave the map as it is.
-  unless (null changed) $
-    writeIORef (glImages r) (foldl' (\m (img, e) -> IM.insert img (ieVersion e) m) uploaded changed)
+  unless (IM.null changed) $ writeIORef (glImages r) (IM.union (ieVersion <$> changed) uploaded)
   pure (or oks)
 
 -- | Scale a logical clip rect to physical pixels and intersect it with a

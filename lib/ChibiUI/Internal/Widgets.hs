@@ -29,7 +29,7 @@ module ChibiUI.Internal.Widgets
   , panel
   ) where
 
-import Control.Monad (foldM, forM, forM_, mfilter, msum, when, void)
+import Control.Monad (foldM, forM, forM_, guard, mfilter, msum, when, void)
 import Data.List (find, transpose)
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
@@ -117,9 +117,7 @@ button t = do
 -- | A box with a caption beside it. Click it, or press Enter/Space while
 -- it is focused, to flip it; returns the value it now holds.
 checkbox :: Text -> Bool -> ChibiUI model Bool
-checkbox t value = do
-  let flipped clicked = clicked /= value
-  flipped <$> markBox t flipped
+checkbox t value = (/= value) <$> markBox t (/= value)
 
 -- | One box per option, in a row: click one, or press Enter/Space while it
 -- is focused, to choose it. Returns the value now chosen.
@@ -135,9 +133,9 @@ radio options value = row $ do
 -- now selected, for the caller to show that page below.
 tabs :: [Text] -> Int -> ChibiUI model Int
 tabs titles selected = row $ do
+  th <- theme
   clicks <- forM (zip [0 ..] titles) $ \(k, t) -> do
     (_, r, i) <- interactive clickable (paddedText t)
-    th <- theme
     flatSurface th r i
     textInRect r t (if k == selected then themeText th else themeTextDim th)
     when (k == selected) (fillRectUI (r {rectY = rectY r + rectH r - 2, rectH = 2}) (themeAccent th))
@@ -225,57 +223,34 @@ data Interaction = Interaction
 focusedKey :: Interaction -> [(Key, a)] -> Maybe a
 focusedKey i keys = if iFocused i then firstPressed (iInput i) keys else Nothing
 
--- | How a widget takes the pointer and the keyboard.
-data InteractionSpec = InteractionSpec
-  { pressTyping :: !Bool
-  -- ^ Whether it takes typing, so app keys stand down while it is focused.
-  , pressCursor :: !UiCursorKind
-  , pressRightFocus :: !Bool
-  -- ^ Whether a right press takes the keyboard too, ahead of its menu.
-  }
+-- | How a widget takes the pointer and the keyboard. Buttons, tree
+-- headers, sliders and tables are 'clickable'. Text fields are 'editable':
+-- they take typing, so app keys stand down while one is focused, show the
+-- text cursor, and take the keyboard on a right press too, ahead of a menu.
+clickable, editable :: Bool
+clickable = False
+editable = True
 
--- | Buttons, tree headers, sliders and tables.
-clickable :: InteractionSpec
-clickable = InteractionSpec False UiCursorPointer False
-
--- | Text fields.
-editable :: InteractionSpec
-editable = InteractionSpec True UiCursorText True
-
--- Every widget that takes input shares Tab reachability, the pointer grab
--- a press takes (with the keyboard), and its cursor while hovered or
--- grabbed. A click is a release over the widget the press grabbed, or
--- Enter/Space while focused.
-interaction :: InteractionSpec -> WidgetId -> Rect -> ChibiUI model Interaction
-interaction p wid r = do
-  off <- isDisabled
-  if off then Interaction False False False False <$> getInput else interaction' p wid r
-
-interaction' :: InteractionSpec -> WidgetId -> Rect -> ChibiUI model Interaction
-interaction' p wid r = do
-  addFocusable wid r (pressTyping p)
-  hov <- hovered r
-  inp <- getInput
-  let press = hov && pressedIn MouseLeft inp
-  when press (void (claimActive wid))
-  when (press || (hov && pressRightFocus p && pressedIn MouseRight inp)) (requestFocus wid)
-  act <- isActive wid
-  focused <- isFocused wid
-  when (hov || act) (wantCursor (pressCursor p))
-  pure Interaction
-    { iHovered = hov
-    , iActive = act
-    , iFocused = focused
-    , iClicked = (releasedIn MouseLeft inp && act && hov) || (focused && any (`pressedIn` inp) [KeyEnter, KeySpace])
-    , iInput = inp
-    }
-
--- | Place an input-taking widget: its id, its rect, and what it got.
-interactive :: InteractionSpec -> ChibiUI model Size -> ChibiUI model (WidgetId, Rect, Interaction)
-interactive p measure = do
+-- | Place an input-taking widget: its id, its rect, and what it got. Every
+-- such widget shares Tab reachability, the pointer grab a press takes (with
+-- the keyboard), and its cursor while hovered or grabbed. A click is a
+-- release over the widget the press grabbed, or Enter/Space while focused.
+interactive :: Bool -> ChibiUI model Size -> ChibiUI model (WidgetId, Rect, Interaction)
+interactive field measure = do
   (wid, r) <- widgetRect measure
-  i <- interaction p wid r
-  pure (wid, r, i)
+  off <- isDisabled
+  if off then (wid, r,) . Interaction False False False False <$> getInput else do
+    addFocusable wid r field
+    hov <- hovered r
+    inp <- getInput
+    let press = hov && pressedIn MouseLeft inp
+    when press (void (claimActive wid))
+    when (press || (hov && field && pressedIn MouseRight inp)) (requestFocus wid)
+    act <- isActive wid
+    focused <- isFocused wid
+    when (hov || act) (wantCursor (if field then UiCursorText else UiCursorPointer))
+    let clicked = (releasedIn MouseLeft inp && act && hov) || (focused && any (`pressedIn` inp) [KeyEnter, KeySpace])
+    pure (wid, r, Interaction hov act focused clicked inp)
 
 -- | A collapsible branch, initially closed. Click or Enter/Space toggles;
 -- Left closes and Right opens a focused header. Children run only while open.
@@ -288,9 +263,7 @@ treeNode title body = column $ do
   wasOpen <- isJust <$> widgetState treeOpen wid
   let open = fromMaybe (if iClicked i then not wasOpen else wasOpen)
         (focusedKey i [(KeyLeft, False), (KeyRight, True)])
-  when (open /= wasOpen) $ do
-    setWidgetState treeOpen wid (if open then Just () else Nothing)
-    requestFrame
+  when (open /= wasOpen) (setWidgetState treeOpen wid (guard open) >> requestFrame)
   th <- theme
   withClip r $ do
     flatSurface th r i
@@ -435,18 +408,12 @@ progressBar fraction = do
 
 data FieldMode = SingleLine | MultiLine | ReadOnly deriving (Eq)
 
--- | Space between a field's box and its text; read-only text has no box.
-fieldInset :: FieldMode -> Float
-fieldInset mode = if mode == ReadOnly then 0 else fieldPad
-
 -- | Whether a field in this mode accepts an editing command, from the
 -- keyboard or its menu: read-only text still moves, selects and copies.
 commandAllowed :: FieldMode -> Command -> Bool
 commandAllowed mode cmd = mode /= ReadOnly || case cmd of
   Move _ _ -> True
-  SelectAll -> True
-  Copy -> True
-  _ -> False
+  _ -> cmd `elem` [SelectAll, Copy]
 
 data DraftEvent = BeginEdit !Text | UpdateEdit !Editor | CommitEdit | CancelEdit
 
@@ -637,7 +604,8 @@ hitCaret t x = search 0 (T.length t)
 -- | The box a field's text scrolls within.
 fieldInner :: FieldMode -> Rect -> Rect
 fieldInner mode r =
-  let inset = rectInflate (-fieldInset mode) r
+  -- Read-only text has no box, so no space between the box and the text.
+  let inset = rectInflate (-(if mode == ReadOnly then 0 else fieldPad)) r
    in inset {rectW = max 0 (rectW inset), rectH = max 0 (rectH inset)}
 
 -- | Where a field's text sits this frame, worked out once for drawing: the
@@ -901,17 +869,14 @@ scrollThumb r content offset =
       thumbY = rectY r + (view - thumbH) * (if maxScroll > 0 then offset / maxScroll else 0)
    in (thumbY, thumbH)
 
--- | How far one wheel step scrolls.
-scrollStep :: Float
-scrollStep = lineHeight * 3
-
 -- | An offset moved by this frame's wheel, while the pointer is over the
 -- region.
 wheelScroll :: Rect -> V2 -> ChibiUI model V2
 wheelScroll r offset@(V2 x y) = do
   hov <- hovered r
   V2 dx dy <- scrollDelta
-  pure (if hov then V2 (x + dx * scrollStep) (y + dy * scrollStep) else offset)
+  -- One wheel step scrolls three lines.
+  pure (if hov then V2 (x + dx * (lineHeight * 3)) (y + dy * (lineHeight * 3)) else offset)
 
 -- | A body under a dimmed title, inside a 1px border with a gap of padding
 -- all round. It fills the line's width, or takes 'nextWidth'.
