@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added `fillWidth`: the next widget takes the rest of the line's width.
+
 - Added `edit getter setter widget`: show part of the model in a widget and
   keep what it returns, in place of `gets` and `modify` around it:
   `edit name (\v m -> m {name = v}) textInput`.
