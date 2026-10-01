@@ -11,9 +11,3 @@ module ChibiUI.Backend.Rgfw
   ) where
 
 import ChibiUI.Rgfw.Internal.Session
-  ( RgfwOptions (..)
-  , WindowSettings (..)
-  , defaultRgfwOptions
-  , defaultWindowSettings
-  , runChibiApp
-  )

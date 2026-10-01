@@ -137,9 +137,7 @@ newtype ChibiUI model a = ChibiUI (ReaderT (Context model) IO a)
 instance MonadState model (ChibiUI model) where
   get = ask >>= liftIO . readModel . ctxModel
   put model = state (const ((), model))
-  state f = do
-    ctx <- ask
-    liftIO (stateModel (ctxModel ctx) f)
+  state f = ask >>= \ctx -> liftIO (stateModel (ctxModel ctx) f)
 
 -- | Wrap a child view's returned message in its parent's message type.
 -- This is 'fmap'; for optional messages use @mapMsg (fmap ParentMsg)@.
@@ -202,12 +200,10 @@ modifyCtx field f = asks field >>= \ref -> liftIO (modifyIORef' ref f)
 {-# INLINE nextId #-}
 nextId :: ChibiUI model WidgetId
 nextId = do
-  ctx <- ask
-  liftIO $ do
-    path <- readIORef (ctxIdPath ctx)
-    sib <- readIORef (ctxIdSib ctx)
-    writeIORef (ctxIdSib ctx) $! sib + 1
-    pure $! widgetIdAt path sib
+  path <- readCtx ctxIdPath
+  sib <- readCtx ctxIdSib
+  writeCtx ctxIdSib $! sib + 1
+  pure $! widgetIdAt path sib
 
 -- | Run a container's body: the next sibling position becomes the child
 -- path, and the body's widgets count from a fresh sibling counter.
@@ -225,18 +221,11 @@ withKey key = withIdScope (keyedPath key)
 -- sibling position, as a widget would.
 withIdScope :: (Word64 -> Word64 -> Word64) -> ChibiUI model a -> ChibiUI model a
 withIdScope childPath body = do
-  ctx <- ask
-  (path, sib) <- liftIO $ do
-    path <- readIORef (ctxIdPath ctx)
-    sib <- readIORef (ctxIdSib ctx)
-    writeIORef (ctxIdPath ctx) $! childPath path sib
-    writeIORef (ctxIdSib ctx) 0
-    pure (path, sib)
-  a <- body
-  liftIO $ do
-    writeIORef (ctxIdPath ctx) path
-    writeIORef (ctxIdSib ctx) $! sib + 1
-  pure a
+  path <- readCtx ctxIdPath
+  sib <- readCtx ctxIdSib
+  writeCtx ctxIdPath $! childPath path sib
+  writeCtx ctxIdSib 0
+  body <* writeCtx ctxIdPath path <* (writeCtx ctxIdSib $! sib + 1)
 
 -- | The hashed key of a widget id, as the store addresses it.
 {-# INLINE slotOf #-}
@@ -269,12 +258,8 @@ place sz = do
 -- | The effect boundary for pure cursor transitions.
 layoutState :: (LayoutState -> (a, LayoutState)) -> ChibiUI model a
 layoutState transition = do
-  ctx <- ask
-  liftIO $ do
-    current <- readIORef (ctxLayout ctx)
-    let (result, next) = transition current
-    next `seq` writeIORef (ctxLayout ctx) next
-    pure result
+  (result, next) <- transition <$> readCtx ctxLayout
+  result <$ (writeCtx ctxLayout $! next)
 
 -- | The cursor as it stands.
 readLayout :: ChibiUI model LayoutState
@@ -292,15 +277,11 @@ availWidth = Layout.remainingWidth <$> readLayout
 
 -- | The width of one line of text, in logical pixels.
 measureText :: Text -> ChibiUI model Float
-measureText t = do
-  font <- readCtx ctxFont
-  liftIO (fontMeasure font t)
+measureText t = readCtx ctxFont >>= liftIO . (`fontMeasure` t)
 
 -- | The size of one line of text, for widgets that wrap it.
 textSize :: Text -> ChibiUI model Size
-textSize t = do
-  w <- measureText t
-  pure (Size w lineHeight)
+textSize t = (`Size` lineHeight) <$> measureText t
 
 -- | A line of text and a widget's padding around it.
 paddedText :: Text -> ChibiUI model Size
@@ -377,11 +358,9 @@ space = layoutCommand . Layout.Space
 -- | This frame's input.
 getInput :: ChibiUI model Input
 getInput = do
-  ctx <- ask
-  liftIO $ do
-    inp <- readIORef (ctxInput ctx)
-    blocked <- readIORef (ctxInputBlocked ctx)
-    pure (if blocked then (clearEphemeral inp) {inputKeysHeld = [], inputButtonsHeld = noButtons} else inp)
+  inp <- readCtx ctxInput
+  blocked <- readCtx ctxInputBlocked
+  pure (if blocked then (clearEphemeral inp) {inputKeysHeld = [], inputButtonsHeld = noButtons} else inp)
 
 -- | The pointer, in window coordinates.
 mousePos :: ChibiUI model V2
@@ -456,7 +435,7 @@ scrollDelta = inputScroll <$> getInput
 -- | Whether the pointer is over a rectangle, in window coordinates.
 hovered :: Rect -> ChibiUI model Bool
 hovered r = do
-  p <- mousePos
+  p <- inputMousePos <$> readCtx ctxInput
   clip <- currentClipRect
   blocked <- readCtx ctxInputBlocked
   pure (not blocked && rectHit r p && rectHit clip p)
@@ -464,13 +443,8 @@ hovered r = do
 -- | Claim the pointer for a widget while its button is held. 'True' when
 -- this call took the grab, so the widget owns the drag.
 claimActive :: WidgetId -> ChibiUI model Bool
-claimActive wid = do
-  ctx <- ask
-  liftIO $
-    atomicModifyIORef' (ctxActive ctx) $ \cur ->
-      if cur == noWidget
-        then (wid, True)
-        else (cur, cur == wid)
+claimActive wid = asks ctxActive >>= \ref -> liftIO . atomicModifyIORef' ref $ \cur ->
+  if cur == noWidget then (wid, True) else (cur, cur == wid)
 
 -- | Whether the widget owns the pointer grab.
 isActive :: WidgetId -> ChibiUI model Bool
@@ -495,11 +469,8 @@ blurFocus = writeCtx ctxFocus noWidget
 -- typing silences app keys while focused.
 addFocusable :: WidgetId -> Rect -> Bool -> ChibiUI model ()
 addFocusable wid r typing = do
-  ctx <- ask
-  liftIO $ do
-    clip <- currentClip (ctxArena ctx)
-    when (rectsOverlap clip r) $
-      modifyIORef' (ctxFocusables ctx) ((wid, typing) :)
+  clip <- currentClipRect
+  when (rectsOverlap clip r) (modifyCtx ctxFocusables ((wid, typing) :))
 
 -- | Ask for a pointer shape while the pointer is over this widget.
 wantCursor :: UiCursorKind -> ChibiUI model ()
@@ -510,15 +481,11 @@ wantCursor = writeCtx ctxCursor
 -- where it was, except on the frame the layout itself changed.
 {-# INLINE recordRect #-}
 recordRect :: WidgetId -> Rect -> ChibiUI model ()
-recordRect wid r = do
-  rects <- asks ctxRects
-  liftIO (insertRect rects (slotOf wid) r)
+recordRect wid r = asks ctxRects >>= \rects -> liftIO (insertRect rects (slotOf wid) r)
 
 -- | Where a widget landed this frame, if it has been declared yet.
 lookupWidgetRect :: WidgetId -> ChibiUI model (Maybe Rect)
-lookupWidgetRect wid = do
-  rects <- asks ctxRects
-  liftIO (lookupRect rects (slotOf wid))
+lookupWidgetRect wid = asks ctxRects >>= liftIO . (`lookupRect` slotOf wid)
 
 -- | The rect of the widget or group placed last.
 itemRect :: ChibiUI model Rect
@@ -589,12 +556,7 @@ drawIO f = asks ctxArena >>= liftIO . f
 
 -- | Restrict both painting and pointer hit tests to a fixed rectangle.
 withClip :: Rect -> ChibiUI model a -> ChibiUI model a
-withClip r body = do
-  ctx <- ask
-  liftIO (pushClip (ctxArena ctx) r)
-  a <- body
-  liftIO (popClip (ctxArena ctx))
-  pure a
+withClip r body = drawIO (`pushClip` r) *> body <* drawIO popClip
 
 -- | The clip as it stands, in window coordinates.
 currentClipRect :: ChibiUI model Rect
@@ -628,25 +590,18 @@ textAlignedIn ax r t col = do
 
 -- | One line of text at a point: @ax@ and @ay@ in 0..1 name the alignment
 -- point within the text's box, so @(0, 0.5)@ centres on the point
--- vertically. Clipped to the current clip only.
+-- vertically. Clipped to the current clip only. A line that lies clear of
+-- the clip, by a line height of margin for glyphs that overhang their box,
+-- emits nothing and skips the measure and the glyph walk.
 drawTextAt :: V2 -> Float -> Float -> Text -> Color -> ChibiUI model ()
-drawTextAt (V2 x y) ax ay t col = do
-  w <- if ax == 0 then pure 0 else measureText t
-  drawGlyphs (x - w * ax) (y - lineHeight * ay) t col
-
--- All text paths share atlas selection and quad emission. A line that
--- lies clear of the clip, by a line height of margin for glyphs that
--- overhang their box, emits nothing and skips the glyph walk.
-drawGlyphs :: Float -> Float -> Text -> Color -> ChibiUI model ()
-drawGlyphs x y t col = do
-  ctx <- ask
-  liftIO $ do
-    let a = ctxArena ctx
-    Rect cx cy cw ch <- currentClip a
-    when (cw > 0 && ch > 0 && x < cx + cw + lineHeight
-      && y < cy + ch + lineHeight && y + lineHeight * 2 > cy) $ do
-      font <- readIORef (ctxFont ctx)
-      fontDrawText font a x y col t
+drawTextAt (V2 x0 y0) ax ay t col = do
+  Rect cx cy cw ch <- currentClipRect
+  let y = y0 - lineHeight * ay
+  when (cw > 0 && ch > 0 && y < cy + ch + lineHeight && y + lineHeight * 2 > cy) $ do
+    font <- readCtx ctxFont
+    w <- if ax == 0 then pure 0 else liftIO (fontMeasure font t)
+    let x = x0 - w * ax
+    when (x < cx + cw + lineHeight) (drawIO (\a -> fontDrawText font a x y col t))
 
 -- | Ask for another frame even without input, as a view that changes on a
 -- timer does.

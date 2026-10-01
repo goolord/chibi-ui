@@ -44,7 +44,7 @@ import ChibiUI.Internal.Context
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
-import ChibiUI.Internal.Font (Font, atlasSize, fontAtlasPixels, fontFree, fontScale, newFont)
+import ChibiUI.Internal.Font (Font, atlasSize, fontAtlasPixels, fontFree, newFont)
 import ChibiUI.Internal.Style (Theme, defaultTheme, themeWindow)
 import ChibiUI.Internal.Types (Size (..), V2 (..), v2Sub, validScale)
 import ChibiUI.Rgfw.Internal.Gl (GlRenderer, freeGlRenderer, newGlRenderer, readRetainedPixels, renderFrameGl)
@@ -154,19 +154,17 @@ runChibiApp opts initial view = inBoundThread $
               R.EventNone -> pure closed
               R.EventWindowClose -> drainEvents True
               _ -> modifyIORef' pendingRef (`stepEvent` ev) >> drainEvents closed
-          -- Settle the scale and the window's size and focus into the input.
-          syncWindow = do
-            size <- R.windowSize win
+          -- Settle the scale and the window's size and focus into the input,
+          -- then run, render and present a frame.
+          frame renderer = do
+            (pw, ph) <- R.windowSize win
             monScale <- R.windowScale win
             userScale <- readIORef (ctxScaleOverride ctx)
             let scale = resolveScale userScale monScale
             setScale ctx scale
             focused <- R.windowFocused win
-            modifyIORef' pendingRef (settleInput scale size focused)
-          renderAndSwap renderer = do
+            modifyIORef' pendingRef (settleInput scale (pw, ph) focused)
             inp0 <- pendInput <$> readIORef pendingRef
-            scale <- fontScale font
-            (pw, ph) <- R.windowSize win
             theme1 <- readIORef (ctxTheme ctx)
             (_, dd) <- runFrame ctx inp0 view
             images <- readIORef (ctxImages ctx)
@@ -191,13 +189,11 @@ runChibiApp opts initial view = inBoundThread $
             unless quit $ do
               R.waitForEvent wait
               closed <- drainEvents False
-              syncWindow
-              renderAndSwap renderer
+              frame renderer
               unless closed (loop renderer)
       bracket newGlRenderer freeGlRenderer $ \renderer -> do
         -- Present the opening frame before blocking on events.
-        syncWindow
-        renderAndSwap renderer
+        frame renderer
         -- Debug dump of the frame and the font atlas, then quit.
         dumpPath <- System.Environment.lookupEnv "CHIBI_UI_DUMP"
         case dumpPath of
@@ -339,7 +335,6 @@ applyEvent inp = \case
   R.EventMouseScroll dx dy -> inp {inputScroll = inputScroll inp `v2Sub` V2 dx dy}
   R.EventKeyChar ch | isPrint ch -> inp {inputChars = inputChars inp ++ [ch]}
   R.EventKeyPress k m -> key k m True
-  R.EventKeyRepeat k m -> key k m True
   R.EventKeyRelease k m -> key k m False
   R.EventOther t | t == R.rgfw_windowFocusOut -> releaseAllKeys inp
   _ -> inp

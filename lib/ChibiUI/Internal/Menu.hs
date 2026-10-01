@@ -92,10 +92,9 @@ openContextMenu :: WidgetId -> Rect -> [(Text, Bool, ChibiUI model ())] -> Chibi
 openContextMenu wid r items = do
   inp <- getInput
   hov <- hovered r
-  focus <- readCtx ctxFocus
-  within <- holdsWithin r ctxFocus
-  let focused = focus == wid || within
-      keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
+  keyboard <- if modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
+    then (||) <$> isFocused wid <*> holdsWithin r ctxFocus
+    else pure False
   when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $
     openPopup wid (if keyboard then rectBottomLeft r else inputMousePos inp) items
 

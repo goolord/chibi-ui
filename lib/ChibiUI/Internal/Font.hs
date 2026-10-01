@@ -85,8 +85,8 @@ data FontState = FontState
   , fsScale :: {-# UNPACK #-} !Float
   , fsSize :: {-# UNPACK #-} !Int
   -- ^ The raster size: the line height in device pixels.
-  , fsFHeight :: {-# UNPACK #-} !Float
-  , fsDescent :: {-# UNPACK #-} !Float
+  , fsBaseline :: {-# UNPACK #-} !Float
+  -- ^ The baseline's depth below the line top, in device pixels.
   , fsSpaceAdv :: {-# UNPACK #-} !Float
   -- ^ The space glyph's advance at the raster size, in device pixels.
   , fsLow :: !(IOArray Int GlyphDev)
@@ -182,8 +182,7 @@ loadState bytes scale = do
       { fsHandle = h
       , fsScale = scale
       , fsSize = sizeD
-      , fsFHeight = fh
-      , fsDescent = ds
+      , fsBaseline = if fh > 0 then fromIntegral sizeD * (fh + ds) / fh else fromIntegral sizeD
         -- The space advance in device pixels, precomputed: a space has
         -- no glyph box, so its width comes from the font's hmtx entry
         -- scaled by the raster size.
@@ -293,28 +292,16 @@ rasterize st cp = do
 -- fractionally, so spacing stays true to 'fontMeasure'.
 fontDrawText :: Font -> DrawArena -> Float -> Float -> Color -> Text -> IO ()
 fontDrawText f arena penX penY col t = do
-  st@FontState {fsHandle = h, fsScale = scale, fsSize = sizeD, fsFHeight = fh, fsDescent = ds} <-
-    readIORef (fState f)
+  st@FontState {fsHandle = h, fsScale = scale, fsBaseline = baseline} <- readIORef (fState f)
   when (h /= nullPtr) $ do
-    let baseline =
-          if fh > 0
-            then fromIntegral sizeD * (fh + ds) / fh
-            else fromIntegral sizeD
-        baseY = fromIntegral (roundHalfUp (penY * scale + baseline))
+    let baseY = fromIntegral (roundHalfUp (penY * scale + baseline))
         invScale = recip scale
     _ <- walkGlyphs st t (penX * scale) $ \pen g ->
       when (gdW g > 0 && gdH g > 0) $
         let px = fromIntegral (roundHalfUp pen)
-         in emitQuadUV arena texAtlas
-              ((px + gdX1 g) * invScale)
-              ((baseY + gdY1 g) * invScale)
-              ((px + gdX1 g + gdW g) * invScale)
-              ((baseY + gdY1 g + gdH g) * invScale)
-              col
-              (gdU0 g)
-              (gdV0 g)
-              (gdU1 g)
-              (gdV1 g)
+         in emitQuadUV arena texAtlas ((px + gdX1 g) * invScale) ((baseY + gdY1 g) * invScale)
+              ((px + gdX1 g + gdW g) * invScale) ((baseY + gdY1 g + gdH g) * invScale)
+              col (gdU0 g) (gdV0 g) (gdU1 g) (gdV1 g)
     pure ()
 
 -- | The atlas coverage bytes. The pointer is stable for the font's

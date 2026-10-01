@@ -26,7 +26,6 @@ module ChibiUI.Internal.Input
   , mouseButtonNumber
   , MouseButtons
   , noButtons
-  , buttonsFromList
   , applyMouseButton
   , applyPointerLeave
   , UiCursorKind (..)
@@ -35,7 +34,7 @@ module ChibiUI.Internal.Input
   ) where
 
 import Control.Monad (unless, when)
-import Data.Bits (Bits, clearBit, countTrailingZeros, setBit, testBit, zeroBits, (.&.))
+import Data.Bits (Bits, clearBit, setBit, testBit, zeroBits, (.&.))
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.List (find)
 import Data.Word (Word32)
@@ -209,11 +208,6 @@ clearEphemeral inp =
     , inputScroll = V2 0 0
     }
 
--- | Append a key in event order.
-{-# INLINE appendInputKey #-}
-appendInputKey :: Key -> [Key] -> [Key]
-appendInputKey k ks = ks ++ [k]
-
 -- | Apply a key press ('True') or release. A press joins 'inputKeys', and
 -- also 'inputKeysHeld' unless the key is already held (an auto-repeat). A
 -- release joins 'inputKeysReleased' and leaves the held keys. Backends pass
@@ -221,14 +215,14 @@ appendInputKey k ks = ks ++ [k]
 applyKey :: Key -> Bool -> Input -> Input
 applyKey k True inp =
   inp
-    { inputKeys = appendInputKey k (inputKeys inp)
-    , inputKeysHeld = if k `elem` held then held else appendInputKey k held
+    { inputKeys = inputKeys inp ++ [k]
+    , inputKeysHeld = if k `elem` held then held else held ++ [k]
     }
   where
     held = inputKeysHeld inp
 applyKey k False inp =
   inp
-    { inputKeysReleased = appendInputKey k (inputKeysReleased inp)
+    { inputKeysReleased = inputKeysReleased inp ++ [k]
     , inputKeysHeld = filter (/= k) (inputKeysHeld inp)
     }
 
@@ -300,49 +294,27 @@ noButtons = MouseButtons 0
 buttonsMember :: MouseButton -> MouseButtons -> Bool
 buttonsMember b (MouseButtons w) = let i = buttonBit b in i >= 0 && testBit w i
 
--- | Whether the set is empty.
-{-# INLINE buttonsNull #-}
-buttonsNull :: MouseButtons -> Bool
-buttonsNull (MouseButtons w) = w == 0
-
--- | The set with the button added.
-{-# INLINE buttonsInsert #-}
-buttonsInsert :: MouseButton -> MouseButtons -> MouseButtons
-buttonsInsert b bs@(MouseButtons w) = let i = buttonBit b in if i < 0 then bs else MouseButtons (setBit w i)
-
--- | The set without the button.
-{-# INLINE buttonsDelete #-}
-buttonsDelete :: MouseButton -> MouseButtons -> MouseButtons
-buttonsDelete b bs@(MouseButtons w) = let i = buttonBit b in if i < 0 then bs else MouseButtons (clearBit w i)
+-- | The set with the button's bit set ('setBit') or cleared ('clearBit').
+{-# INLINE buttonsWith #-}
+buttonsWith :: (Word32 -> Int -> Word32) -> MouseButton -> MouseButtons -> MouseButtons
+buttonsWith f b bs@(MouseButtons w) = let i = buttonBit b in if i < 0 then bs else MouseButtons (f w i)
 
 -- | The buttons in the set, by number.
 buttonsToList :: MouseButtons -> [MouseButton]
-buttonsToList (MouseButtons w)
-  | w == 0 = []
-  | otherwise =
-      let i = countTrailingZeros w
-       in mouseButtonNumber (i + 1) : buttonsToList (MouseButtons (clearBit w i))
-
--- | The set of the buttons listed.
-buttonsFromList :: [MouseButton] -> MouseButtons
-buttonsFromList = foldl' (flip buttonsInsert) noButtons
+buttonsToList (MouseButtons w) = [mouseButtonNumber (i + 1) | i <- [0 .. 31], testBit w i]
 
 -- | Apply a button press ('True') or release to the held, pressed and
 -- released sets.
 applyMouseButton :: MouseButton -> Bool -> Input -> Input
 applyMouseButton b True inp =
-  inp {inputButtonsHeld = buttonsInsert b (inputButtonsHeld inp), inputButtonsPressed = buttonsInsert b (inputButtonsPressed inp)}
+  inp {inputButtonsHeld = buttonsWith setBit b (inputButtonsHeld inp), inputButtonsPressed = buttonsWith setBit b (inputButtonsPressed inp)}
 applyMouseButton b False inp =
-  inp {inputButtonsHeld = buttonsDelete b (inputButtonsHeld inp), inputButtonsReleased = buttonsInsert b (inputButtonsReleased inp)}
+  inp {inputButtonsHeld = buttonsWith clearBit b (inputButtonsHeld inp), inputButtonsReleased = buttonsWith setBit b (inputButtonsReleased inp)}
 
 -- | The pointer left the window: move it off every widget, so nothing stays
 -- hovered. Held buttons stay held until their releases arrive.
 applyPointerLeave :: Input -> Input
-applyPointerLeave inp = inp {inputMousePos = offWindow}
-
--- | A point far outside any window.
-offWindow :: V2
-offWindow = V2 (-1e6) (-1e6)
+applyPointerLeave inp = inp {inputMousePos = V2 (-1e6) (-1e6)}
 
 -- | Compare interaction fields, including buttons, keys, scroll and window
 -- size. Pointer motion and elapsed time are ignored.
@@ -354,4 +326,4 @@ inputInteracted a b = quiet a /= quiet b
 -- | Whether any mouse button is held.
 {-# INLINE inputPointerHeld #-}
 inputPointerHeld :: Input -> Bool
-inputPointerHeld = not . buttonsNull . inputButtonsHeld
+inputPointerHeld = (/= noButtons) . inputButtonsHeld

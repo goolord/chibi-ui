@@ -108,13 +108,7 @@ copyInto old dd = do
       pure (fp, cap)
   withForeignPtr buf $ \dst ->
     withForeignPtr (drawVertices dd) $ \src -> copyBytes dst src len
-  pure
-    FrameSnapshot
-      { snapBuffer = buf
-      , snapCapacity = cap
-      , snapBytes = len
-      , snapTextures = map cmdTextureId (drawCommands dd)
-      }
+  pure FrameSnapshot {snapBuffer = buf, snapCapacity = cap, snapBytes = len, snapTextures = map cmdTextureId (drawCommands dd)}
 
 -- | Diff a snapshot against the frame just drawn. Texture contents are
 -- assumed unchanged; the backend forces a full frame when the atlas or an

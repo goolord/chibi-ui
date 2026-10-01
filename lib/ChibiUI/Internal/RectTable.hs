@@ -18,9 +18,10 @@ module ChibiUI.Internal.RectTable
   , rectTableToList
   ) where
 
-import Control.Monad (forM_, when)
+import Control.Monad (forM, forM_, when)
 import Data.Bits ((.&.))
 import Data.IORef
+import Data.Maybe (catMaybes)
 import GHC.Exts
   ( Float (..)
   , Int (..)
@@ -61,14 +62,9 @@ initialCap = 256
 
 -- | A new, empty table.
 newRectTable :: IO RectTable
-newRectTable = do
-  keys <- allocKeys initialCap
-  rects <- allocRects initialCap
-  kref <- newIORef keys
-  rref <- newIORef rects
-  cap <- newIORef initialCap
-  count <- newURef 0
-  pure (RectTable kref rref cap count)
+newRectTable =
+  RectTable <$> (newIORef =<< allocKeys initialCap) <*> (newIORef =<< allocRects initialCap)
+    <*> newIORef initialCap <*> newURef 0
 
 allocKeys :: Int -> IO MBox
 allocKeys n = do
@@ -116,27 +112,18 @@ insertRect rt k r = do
   count <- readURef (rtCount rt)
   cap <- readIORef (rtCap rt)
   when ((count + 1) * 4 > cap * 3) (growTable rt)
-  i <- slotFor rt k
-  fresh <- (== 0) <$> readKeyAt rt i
+  keys <- readIORef (rtKeys rt)
+  i <- slotFor rt keys k
+  fresh <- (== 0) <$> readIntAt keys i
   writeRectAt rt i r
-  when fresh $ do
-    writeKeyAt rt i k
-    writeURef (rtCount rt) (count + 1)
-
--- | The index of a slot's entry, or -1 when the slot was not recorded.
-{-# INLINE probe #-}
-probe :: RectTable -> Int -> IO Int
-probe rt k = do
-  i <- slotFor rt k
-  key <- readKeyAt rt i
-  pure (if key == 0 then -1 else i)
+  when fresh (writeIntAt keys i k >> writeURef (rtCount rt) (count + 1))
 
 -- | Linear probing from the slot's home: the index holding the slot, or
 -- the empty index where it would go. The load bound keeps an empty one.
+-- @keys@ is the table's current key box.
 {-# INLINE slotFor #-}
-slotFor :: RectTable -> Int -> IO Int
-slotFor rt k = do
-  MBox keys <- readIORef (rtKeys rt)
+slotFor :: RectTable -> MBox -> Int -> IO Int
+slotFor rt (MBox keys) k = do
   cap <- readIORef (rtCap rt)
   let !(I# k#) = k
       !(I# max#) = cap - 1
@@ -146,15 +133,6 @@ slotFor rt k = do
           | isTrue# (key# ==# 0#) || isTrue# (key# ==# k#) -> (# s', I# i# #)
           | otherwise -> go (if isTrue# (i# ==# max#) then 0# else i# +# 1#) s'
   IO (go start#)
-
--- | The key stored at an entry index; zero for an empty entry.
-{-# INLINE readKeyAt #-}
-readKeyAt :: RectTable -> Int -> IO Int
-readKeyAt rt i = readIORef (rtKeys rt) >>= \keys -> readIntAt keys i
-
-{-# INLINE writeKeyAt #-}
-writeKeyAt :: RectTable -> Int -> Int -> IO ()
-writeKeyAt rt i k = readIORef (rtKeys rt) >>= \keys -> writeIntAt keys i k
 
 {-# INLINE writeRectAt #-}
 writeRectAt :: RectTable -> Int -> Rect -> IO ()
@@ -196,21 +174,16 @@ writeFloatAt (MBox a) (I# i#) (F# f#) = IO $ \s -> (# writeFloatArray# a i# f# s
 -- | The rect recorded under a slot this frame, if any.
 lookupRect :: RectTable -> Int -> IO (Maybe Rect)
 lookupRect rt k = do
-  i <- probe rt k
-  if i < 0 then pure Nothing else Just <$> readRectAt rt i
+  keys <- readIORef (rtKeys rt)
+  i <- slotFor rt keys k
+  key <- readIntAt keys i
+  if key == 0 then pure Nothing else Just <$> readRectAt rt i
 
 -- | Every recorded slot and rect, in slot order, for hosts and tests.
 rectTableToList :: RectTable -> IO [(Int, Rect)]
 rectTableToList rt = do
   cap <- readIORef (rtCap rt)
-  let collect :: Int -> [(Int, Rect)] -> IO [(Int, Rect)]
-      collect i acc
-        | i < 0 = pure acc
-        | otherwise = do
-            key <- readKeyAt rt i
-            if key == 0
-              then collect (i - 1) acc
-              else do
-                r <- readRectAt rt i
-                collect (i - 1) ((key, r) : acc)
-  collect (cap - 1) []
+  keys <- readIORef (rtKeys rt)
+  fmap catMaybes . forM [0 .. cap - 1] $ \i -> do
+    key <- readIntAt keys i
+    if key == 0 then pure Nothing else Just . (,) key <$> readRectAt rt i

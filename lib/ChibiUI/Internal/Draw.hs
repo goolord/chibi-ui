@@ -158,12 +158,7 @@ finishFrame a = do
   vc <- readURef (daVertexCount a)
   pend <- pendingCmd a
   closed <- readIORef (daCommands a)
-  pure
-    DrawData
-      { drawVertices = vfp
-      , drawVertexCount = vc
-      , drawCommands = reverse (pend ++ closed)
-      }
+  pure DrawData {drawVertices = vfp, drawVertexCount = vc, drawCommands = reverse (pend ++ closed)}
 
 -- | The open batch as a command, if one is open.
 pendingCmd :: DrawArena -> IO [DrawCmd]

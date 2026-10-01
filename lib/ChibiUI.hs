@@ -199,30 +199,3 @@ import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Style (Theme (..), TextAlign (..), defaultTheme, lightTheme)
 import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))
 import ChibiUI.Internal.Widgets
-  ( button
-  , checkbox
-  , radio
-  , combo
-  , tabs
-  , floatInput
-  , image
-  , intInput
-  , label
-  , labelDim
-  , labelWrapped
-  , labeled
-  , plotLines
-  , progressBar
-  , selectableText
-  , scrollColumn
-  , separator
-  , separatorText
-  , panel
-  , slider
-  , dragFloat
-  , table
-  , treeNode
-  , textInput
-  , textInputHint
-  , textArea
-  )
