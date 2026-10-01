@@ -8,6 +8,7 @@ module ChibiUI.Internal.Store
   , treeOpen
   , tableSelection
   , comboPicks
+  , tooltipHovers
   , scrollRegions
   , textFields
   , lookupState
@@ -31,13 +32,14 @@ data WidgetStore = WidgetStore
   { storeTreeOpen :: !(IntMap ())
   , storeTableSelection :: !(IntMap Int)
   , storeComboPick :: !(IntMap Int)
+  , storeTooltip :: !(IntMap Double)
   , storeScroll :: !(IntMap ScrollState)
   , storeTextField :: !(IntMap FieldState)
   }
 
 -- | No widget has state.
 emptyWidgetStore :: WidgetStore
-emptyWidgetStore = WidgetStore IM.empty IM.empty IM.empty IM.empty IM.empty
+emptyWidgetStore = WidgetStore IM.empty IM.empty IM.empty IM.empty IM.empty IM.empty
 
 -- | One of the store's maps: how to read it, and how to put a new one back.
 -- The accessors inline at the map they are given, so a write compiles to
@@ -55,6 +57,10 @@ tableSelection = StoreMap storeTableSelection (\m st -> st {storeTableSelection 
 -- | The option a combo's menu chose, until the combo next runs.
 comboPicks :: StoreMap Int
 comboPicks = StoreMap storeComboPick (\m st -> st {storeComboPick = m})
+
+-- | When the pointer came to rest over each tooltip's item.
+tooltipHovers :: StoreMap Double
+tooltipHovers = StoreMap storeTooltip (\m st -> st {storeTooltip = m})
 
 -- | Each scroll region's offset and body extent.
 scrollRegions :: StoreMap ScrollState

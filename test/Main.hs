@@ -4,6 +4,7 @@
 -- and check what the widgets did. No window, no GL.
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Monad (filterM)
 import Data.IORef
 import Data.List (nub, sortOn)
@@ -35,6 +36,7 @@ main = do
   testCombo
   testTabs
   testLastItem
+  testTooltip
   testTable
   testRaggedTable
   testPlotLines
@@ -549,6 +551,26 @@ testLastItem = do
   (_, _, focusedAfter, activeAfter) <- frame ctx id view
   assert "last item: group did not report its pressed, focused child"
     (activePress && focusedPress && focusedAfter && not activeAfter)
+
+-- A tooltip shows once the pointer has rested on its item, and goes when
+-- the pointer leaves.
+testTooltip :: IO ()
+testTooltip = do
+  ctx <- newTestContext
+  let view = button "hover me" >> tooltip "tip"
+      quads f = do
+        inp0 <- contextInput ctx
+        (_, dd) <- runFrame ctx (f (clearEphemeral inp0)) view
+        pure (sum (map cmdQuadCount (drawCommands dd)))
+  plain <- quads id
+  r <- bigRect =<< readRects ctx
+  let over = at (rectX r + 2) (rectY r + 2)
+  early <- quads over
+  threadDelay 600000
+  shown <- quads over
+  gone <- quads (at 500 400)
+  assert ("tooltip: wrong quads: " ++ show (plain, early, shown, gone))
+    (early == plain && shown > plain && gone == plain)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.

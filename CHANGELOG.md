@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `tooltip text`: once the pointer has rested on the preceding
+  widget or group for half a second, the text shows beside the pointer,
+  over every widget. It waits with `requestFrameAt`, not by polling.
+
 - Added last-item queries: `itemRect`, `itemHovered`, `itemFocused` and
   `itemActive` ask about the widget or group placed just before, as
   `contextMenu` attaches to it.
