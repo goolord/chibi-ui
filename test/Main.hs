@@ -33,6 +33,7 @@ main = do
   testCheckbox
   testRadio
   testCombo
+  testTabs
   testTable
   testRaggedTable
   testPlotLines
@@ -508,6 +509,21 @@ testCombo = do
   kept <- frame ctx id view
   assert ("combo: menu did not choose: " ++ show (opened, picked, kept))
     (opened == 'a' && picked == 'b' && kept == 'b')
+
+-- Clicking a tab header selects it.
+testTabs :: IO ()
+testTabs = do
+  ctx <- newTestContext
+  ref <- newIORef 0
+  let view = do
+        v <- tabs ["one", "two", "three"] =<< liftIO (readIORef ref)
+        liftIO (writeIORef ref v)
+        pure v
+  _ <- frame ctx id view
+  rs <- readRects ctx
+  selected <- clickIn ctx (last rs) view
+  kept <- frame ctx id view
+  assert "tabs: click did not select the tab" (length rs == 3 && selected == 2 && kept == 2)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.

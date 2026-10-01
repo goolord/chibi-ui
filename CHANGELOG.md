@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `tabs titles selected`: a row of tab headers that selects the one
+  clicked, for the caller to show its page.
+
 - Added `combo options value`: a field showing the chosen option that
   opens a menu of the options.
 
