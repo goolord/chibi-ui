@@ -42,6 +42,7 @@ main = do
   testEdit
   testFillWidth
   testPanel
+  testTextInputHint
   testTable
   testRaggedTable
   testPlotLines
@@ -650,6 +651,28 @@ testPanel = do
     (rectW outer == 800 - themeWindowPad th * 2
       && left - rectX outer == gap && top - rectY outer == gap
       && rectY outer + rectH outer - bottom == gap)
+
+-- An empty, unfocused field draws its hint; typing hides it.
+testTextInputHint :: IO ()
+testTextInputHint = do
+  ctx <- newTestContext
+  ref <- newIORef ""
+  let view = do
+        v <- textInputHint "hint" =<< liftIO (readIORef ref)
+        liftIO (writeIORef ref v)
+      quads f = do
+        inp0 <- contextInput ctx
+        (_, dd) <- runFrame ctx (f (clearEphemeral inp0)) view
+        pure (sum (map cmdQuadCount (drawCommands dd)))
+  withHint <- quads id
+  (_, plain) <- runFrame ctx emptyInput (withKey "plain" (textInput ""))
+  let plainQuads = sum (map cmdQuadCount (drawCommands plain))
+  _ <- quads (keys [KeyTab])
+  _ <- quads (typeText "x")
+  typed <- readIORef ref
+  focusedEmpty <- quads (keys [KeyBackspace])
+  assert ("hint: drawn wrong: " ++ show (withHint, plainQuads, typed, focusedEmpty))
+    (withHint > plainQuads && typed == "x" && focusedEmpty < withHint)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.
