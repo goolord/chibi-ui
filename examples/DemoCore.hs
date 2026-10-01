@@ -37,6 +37,17 @@ demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line."
 
 demo :: ChibiUI Model ()
 demo = do
+  -- The whole tour scrolls when the window is shorter than it.
+  scrollColumn tour
+
+  -- F12 toggles an overlay of every widget's rect, drawn over the view.
+  f12 <- keyPressed (KeyF 12)
+  when f12 (modify (\m -> m {debug = not (debug m)}))
+  showDebug <- gets debug
+  when showDebug debugOverlay
+
+tour :: ChibiUI Model ()
+tour = do
   label "chibi-ui tour"
   separator
   labelWrapped "Every widget chibi-ui has, in one window. Narrow the window to see this line wrap."
@@ -133,14 +144,11 @@ demo = do
 
   space 4
   labelDim "scrolled rows:"
+  -- Inside the scrolling window there is no remaining height to fill, so
+  -- the nested region takes a fixed one.
+  nextHeight 160
   scrollColumn $ do
     mapM_ (\i -> label ("row " <> T.pack (show (i :: Int)))) [1 .. 40]
-
-  -- F12 toggles an overlay of every widget's rect, drawn over the view.
-  f12 <- keyPressed (KeyF 12)
-  when f12 (modify (\m -> m {debug = not (debug m)}))
-  showDebug <- gets debug
-  when showDebug debugOverlay
 
 -- | A blue-to-white gradient, four bytes per pixel, top row first.
 gradientPixels :: Int -> Int -> BS.ByteString
