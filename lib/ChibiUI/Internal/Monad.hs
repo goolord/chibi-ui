@@ -8,6 +8,7 @@ module ChibiUI.Internal.Monad
   ( ChibiUI
   , mapMsg
   , mapModel
+  , edit
   , runChibiUI
   , askContext
   , readCtx
@@ -165,6 +166,16 @@ mapModel project replace (ChibiUI view) = ChibiUI (withReaderT focus view)
           , stateModel = \f -> stateModel parent $ \whole ->
               let (result, child) = f (project whole) in (result, replace child whole)
           }
+
+-- | Show part of the model in a widget and keep what the widget returns,
+-- with a getter and setter as 'mapModel' takes them. Returns the new value.
+--
+-- > edit name (\v m -> m {name = v}) textInput
+edit :: (model -> a) -> (a -> model -> model) -> (a -> ChibiUI model a) -> ChibiUI model a
+edit project replace widget = do
+  v <- widget =<< gets project
+  modify (replace v)
+  pure v
 
 -- | Run an action against a context, retaining any model updates in it.
 runChibiUI :: Context model -> ChibiUI model a -> IO a

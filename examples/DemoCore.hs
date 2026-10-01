@@ -60,35 +60,28 @@ demo = do
       label . T.pack . show =<< gets count
       plus <- button "+"
       when plus (modify (\m -> m {count = count m + 1}))
-    lock <- checkbox "lock" isLocked
-    modify (\m -> m {locked = lock})
+    edit locked (\v m -> m {locked = v}) (checkbox "lock")
 
   space 4
 
-  -- Text and number fields.
+  -- Text and number fields. 'edit' shows part of the model in a widget
+  -- and keeps what the widget returns.
   labeled "name" $ do
     nextWidth 180
-    value <- textInput =<< gets name
-    modify (\m -> m {name = value})
-  labeled "temp" $ do
-    value <- floatInput =<< gets temperature
-    modify (\m -> m {temperature = value})
+    edit name (\v m -> m {name = v}) textInput
+  labeled "temp" (edit temperature (\v m -> m {temperature = v}) floatInput)
   labelDim "Drag to select; double-click a word; right-click to edit."
   labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo"
 
   -- Slider and line plot.
   labeled "frequency" $ do
     nextWidth 180
-    started <- gets volume
-    v <- slider started 0 1
-    modify (\m -> m {volume = v})
+    v <- edit volume (\v m -> m {volume = v}) (\x -> slider x 0 1)
     nextWidth 80
     progressBar v
-  shown <- checkbox "show plot" =<< gets showPlot
-  modify (\m -> m {showPlot = shown})
+  shown <- edit showPlot (\v m -> m {showPlot = v}) (checkbox "show plot")
   vol <- gets volume
-  shape <- radio [("sine", Sine), ("saw", Saw)] =<< gets wave
-  modify (\m -> m {wave = shape})
+  shape <- edit wave (\v m -> m {wave = v}) (radio [("sine", Sine), ("saw", Saw)])
   let sample x = case shape of
         Sine -> sin x
         Saw -> x / pi - 2 * fromIntegral (floor (x / (2 * pi)) :: Int)
@@ -98,8 +91,8 @@ demo = do
     plotLines [sample (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
 
   newline
-  hi <- combo [("hello", "hello"), ("hi", "hi"), ("howdy", "howdy")] =<< gets salutation
-  modify (\m -> m {salutation = hi})
+  hi <- edit salutation (\v m -> m {salutation = v})
+    (combo [("hello", "hello"), ("hi", "hi"), ("howdy", "howdy")])
   let greeting = (\value -> hi <> ", " <> value <> "!") <$> gets name
   label =<< greeting
   contextMenu [("Copy greeting", setClipboard =<< greeting),
@@ -114,8 +107,7 @@ demo = do
   space 4
 
   -- Tabs pick which page shows below them; each page is one keyed group.
-  page <- tabs ["table", "tree", "notes"] =<< gets tab
-  modify (\m -> m {tab = page})
+  page <- edit tab (\v m -> m {tab = v}) (tabs ["table", "tree", "notes"])
   column $ case page of
     0 -> withKey "table" $ do
       -- Table with row selection.
@@ -131,8 +123,8 @@ demo = do
           selectableText "Widgets.hs"
         selectableText "README.md"
     _ -> withKey "notes" $ do
-      editedNotes <- textArea =<< gets notes
-      modify (\m -> m {notes = editedNotes})
+      _ <- edit notes (\v m -> m {notes = v}) textArea
+      pure ()
 
   space 4
   labelDim "scrolled rows:"

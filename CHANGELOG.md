@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `edit getter setter widget`: show part of the model in a widget and
+  keep what it returns, in place of `gets` and `modify` around it:
+  `edit name (\v m -> m {name = v}) textInput`.
+
 - Added `labeled caption body`: a caption and a widget in a row, the
   caption aligned with a field, in place of `row`, `alignTextToFrame` and
   `label`.

@@ -55,6 +55,7 @@ module ChibiUI
   , modify
   , modify'
   , mapModel
+  , edit
 
     -- * Widgets
   , label
