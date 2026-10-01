@@ -32,6 +32,7 @@ main = do
   testSlider
   testCheckbox
   testRadio
+  testCombo
   testTable
   testRaggedTable
   testPlotLines
@@ -487,6 +488,26 @@ testRadio = do
   chosen <- clickIn ctx (last rs) view
   kept <- frame ctx id view
   assert "radio: click did not choose the option" (chosen == 'c' && kept == 'c')
+
+-- A click opens the combo's menu, and a press on an option chooses it.
+testCombo :: IO ()
+testCombo = do
+  ctx <- newTestContext
+  ref <- newIORef 'a'
+  let view = do
+        v <- combo [("a", 'a'), ("b", 'b'), ("c", 'c')] =<< liftIO (readIORef ref)
+        liftIO (writeIORef ref v)
+        pure v
+  _ <- frame ctx id view
+  r <- bigRect =<< readRects ctx
+  opened <- clickIn ctx r view
+  -- The menu opens under the combo, its rows 26 tall below a 1px border.
+  let second = at (rectX r + 10) (rectY r + rectH r + 1 + 26 * 1.5)
+  picked <- frame ctx (second . pressLeft) view
+  _ <- frame ctx (second . releaseLeft) view
+  kept <- frame ctx id view
+  assert ("combo: menu did not choose: " ++ show (opened, picked, kept))
+    (opened == 'a' && picked == 'b' && kept == 'b')
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.

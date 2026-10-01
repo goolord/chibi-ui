@@ -22,6 +22,7 @@ data Model = Model
   , notes :: !Text
   , showPlot :: !Bool
   , wave :: !Wave
+  , salutation :: !Text
   }
 
 data Wave = Sine | Saw
@@ -29,7 +30,7 @@ data Wave = Sine | Saw
 
 -- | The model the demo starts with.
 demoModel :: Model
-demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine
+demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine "hello"
 
 demo :: ChibiUI Model ()
 demo = do
@@ -98,7 +99,9 @@ demo = do
     plotLines [sample (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
 
   newline
-  let greeting = (\value -> "hello, " <> value <> "!") <$> gets name
+  hi <- combo [("hello", "hello"), ("hi", "hi"), ("howdy", "howdy")] =<< gets salutation
+  modify (\m -> m {salutation = hi})
+  let greeting = (\value -> hi <> ", " <> value <> "!") <$> gets name
   label =<< greeting
   contextMenu [("Copy greeting", setClipboard =<< greeting),
                ("Reset counter", modify (\m -> m {count = 0}))]

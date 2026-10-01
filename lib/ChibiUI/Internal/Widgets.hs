@@ -7,6 +7,7 @@ module ChibiUI.Internal.Widgets
   , button
   , checkbox
   , radio
+  , combo
   , treeNode
   , textInput
   , textArea
@@ -22,8 +23,8 @@ module ChibiUI.Internal.Widgets
   ) where
 
 import Control.Monad (foldM, forM, forM_, mfilter, msum, when, void)
-import Data.List (transpose)
-import Data.Maybe (fromMaybe, isJust)
+import Data.List (find, transpose)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
@@ -32,7 +33,7 @@ import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Editor
-import ChibiUI.Internal.Menu (openContextMenu)
+import ChibiUI.Internal.Menu (openContextMenu, openPopup)
 import qualified ChibiUI.Internal.Layout as Layout
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Store
@@ -92,6 +93,27 @@ radio options value = row $ do
     -- Options before the chosen one drew already: show them next frame.
     Just x | x /= value -> x <$ requestFrame
     _ -> pure value
+
+-- | A field showing the chosen option's caption: click it, or press
+-- Enter/Space while it is focused, for a menu of the options. Returns the
+-- value now chosen.
+combo :: Eq a => [(Text, a)] -> a -> ChibiUI model a
+combo options value = do
+  (wid, r, i) <- interactive clickable (fieldSize 160)
+  picked <- widgetState comboPicks wid
+  when (isJust picked) (setWidgetState comboPicks wid Nothing)
+  when (iClicked i) $ openPopup wid (V2 (rectX r) (rectY r + rectH r))
+    [(t, True, setWidgetState comboPicks wid (Just k)) | (k, (t, _)) <- zip [0 ..] options]
+  let chosen = maybe value snd (listToMaybe . (`drop` options) =<< picked)
+  th <- theme
+  fillRectUI r (surfaceFor th i)
+  frameBorder th r (iFocused i)
+  drawTextIn (rectInflate (-widgetPad) r) (maybe "" fst (find ((== chosen) . snd) options)) (themeText th)
+  -- A small downward triangle at the right edge.
+  let ax = rectX r + rectW r - widgetPad - 8
+      ay = rectY r + rectH r / 2 - 2
+  forM_ [0 .. 3] $ \k -> fillRectUI (Rect (ax + k) (ay + k) (8 - k * 2) 1) (themeTextDim th)
+  pure chosen
 
 -- | A box with a caption after it, filled while @marked@ says, given
 -- whether it was clicked this frame. 'True' on click, or Enter/Space

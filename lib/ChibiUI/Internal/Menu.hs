@@ -1,6 +1,6 @@
 -- | One flat, window-clamped context menu, painted after the normal view.
 module ChibiUI.Internal.Menu
-  ( contextMenu, openContextMenu, processPopup, paintPopup ) where
+  ( contextMenu, openContextMenu, openPopup, processPopup, paintPopup ) where
 
 import Control.Monad (forM_, when)
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
@@ -27,7 +27,6 @@ contextMenu items = do
 
 openContextMenu :: WidgetId -> Rect -> [(Text, Bool, ChibiUI model ())] -> ChibiUI model ()
 openContextMenu wid r items = do
-  ctx <- askContext
   inp <- getInput
   hov <- hovered r
   focus <- readCtx ctxFocus
@@ -36,14 +35,21 @@ openContextMenu wid r items = do
         && x + w <= rectX r + rectW r && y + h <= rectY r + rectH r
       focused = focus == wid || (focus /= noWidget && maybe False within focusRect)
       keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
-  when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $ do
-    let position = if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp
-        actions = [(t, enabled, runChibiUI ctx action) | (t, enabled, action) <- items]
-        selected = firstOr (enabledIndices items)
-    writeCtx ctxPopup (Just (Popup wid position actions selected (inputMousePos inp)))
-    writeCtx ctxActive noWidget
-    writeCtx ctxInputBlocked True
-    requestFrame
+  when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $
+    openPopup wid (if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp) items
+
+-- | Open a menu of @items@ at a point, for a widget: it closes when the
+-- widget stops being declared. The first enabled item starts selected.
+openPopup :: WidgetId -> V2 -> [(Text, Bool, ChibiUI model ())] -> ChibiUI model ()
+openPopup wid position items = do
+  ctx <- askContext
+  inp <- getInput
+  let actions = [(t, enabled, runChibiUI ctx action) | (t, enabled, action) <- items]
+      selected = firstOr (enabledIndices items)
+  writeCtx ctxPopup (Just (Popup wid position actions selected (inputMousePos inp)))
+  writeCtx ctxActive noWidget
+  writeCtx ctxInputBlocked True
+  requestFrame
 
 -- | The positions of the enabled items.
 enabledIndices :: [(a, Bool, b)] -> [Int]
