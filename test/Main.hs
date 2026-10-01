@@ -38,6 +38,7 @@ main = do
   testLastItem
   testTooltip
   testDisabled
+  testLabeled
   testTable
   testRaggedTable
   testPlotLines
@@ -593,6 +594,18 @@ testDisabled = do
   (_, onFocus) <- frame ctx id view
   assert "disabled: button reacted while disabled, or not once enabled"
     (not offClick && not offTab && onClick && onFocus)
+
+-- A labeled widget sits right of its caption, on one line as tall as a
+-- field.
+testLabeled :: IO ()
+testLabeled = do
+  ctx <- newTestContext
+  _ <- frame ctx id (labeled "caption" (textInput "value"))
+  rs <- readRects ctx
+  case rs of
+    [caption, field] -> assert ("labeled: caption and field misplaced: " ++ show rs)
+      (rectX caption < rectX field && rectY caption == rectY field && rectH caption == rectH field)
+    _ -> fail ("labeled: expected two rects: " ++ show rs)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.

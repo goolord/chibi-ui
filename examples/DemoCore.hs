@@ -40,9 +40,7 @@ demo = do
   separator
   space 4
 
-  row $ do
-    alignTextToFrame
-    label "UI scale"
+  labeled "UI scale" $ do
     one <- button "1x"
     medium <- button "1.5x"
     two <- button "2x"
@@ -68,24 +66,18 @@ demo = do
   space 4
 
   -- Text and number fields.
-  row $ do
-    alignTextToFrame
-    label "name"
+  labeled "name" $ do
     nextWidth 180
     value <- textInput =<< gets name
     modify (\m -> m {name = value})
-  row $ do
-    alignTextToFrame
-    label "temp"
+  labeled "temp" $ do
     value <- floatInput =<< gets temperature
     modify (\m -> m {temperature = value})
   labelDim "Drag to select; double-click a word; right-click to edit."
   labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo"
 
   -- Slider and line plot.
-  row $ do
-    alignTextToFrame
-    label "frequency"
+  labeled "frequency" $ do
     nextWidth 180
     started <- gets volume
     v <- slider started 0 1
