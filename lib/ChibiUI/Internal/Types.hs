@@ -18,6 +18,7 @@ module ChibiUI.Internal.Types
   , rectUnion
   , rectIntersect
   , rectsOverlap
+  , rectContains
   , rectInflate
   , rectArea
   , v2Sub
@@ -140,6 +141,12 @@ rectIntersect (Rect x1 y1 w1 h1) (Rect x2 y2 w2 h2) =
 {-# INLINE rectsOverlap #-}
 rectsOverlap :: Rect -> Rect -> Bool
 rectsOverlap a b = isJust (rectIntersect a b)
+
+-- | Whether the second rectangle lies wholly inside the first.
+{-# INLINE rectContains #-}
+rectContains :: Rect -> Rect -> Bool
+rectContains (Rect x y w h) (Rect x' y' w' h') =
+  x' >= x && y' >= y && x' + w' <= x + w && y' + h' <= y + h
 
 -- | Extend every edge by the margin. A negative margin shrinks the rectangle.
 {-# INLINE rectInflate #-}

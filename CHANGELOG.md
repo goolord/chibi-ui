@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added last-item queries: `itemRect`, `itemHovered`, `itemFocused` and
+  `itemActive` ask about the widget or group placed just before, as
+  `contextMenu` attaches to it.
+
 - Added `tabs titles selected`: a row of tab headers that selects the one
   clicked, for the caller to show its page.
 

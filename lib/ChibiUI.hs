@@ -131,6 +131,16 @@ module ChibiUI
   , blurFocus
   , withKey
 
+    -- * Last item
+
+    -- | What happened to the widget or group placed just before: a
+    -- 'row' or 'column' counts as one item, so these ask about the
+    -- whole group.
+  , itemRect
+  , itemHovered
+  , itemFocused
+  , itemActive
+
     -- * Drawing
   , theme
   , withTheme

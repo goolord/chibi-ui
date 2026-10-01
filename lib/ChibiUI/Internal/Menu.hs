@@ -31,9 +31,7 @@ openContextMenu wid r items = do
   hov <- hovered r
   focus <- readCtx ctxFocus
   focusRect <- lookupWidgetRect focus
-  let within (Rect x y w h) = x >= rectX r && y >= rectY r
-        && x + w <= rectX r + rectW r && y + h <= rectY r + rectH r
-      focused = focus == wid || (focus /= noWidget && maybe False within focusRect)
+  let focused = focus == wid || (focus /= noWidget && maybe False (rectContains r) focusRect)
       keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
   when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $
     openPopup wid (if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp) items

@@ -34,6 +34,7 @@ main = do
   testRadio
   testCombo
   testTabs
+  testLastItem
   testTable
   testRaggedTable
   testPlotLines
@@ -524,6 +525,30 @@ testTabs = do
   selected <- clickIn ctx (last rs) view
   kept <- frame ctx id view
   assert "tabs: click did not select the tab" (length rs == 3 && selected == 2 && kept == 2)
+
+-- Last-item queries answer for the widget or group placed just before.
+testLastItem :: IO ()
+testLastItem = do
+  ctx <- newTestContext
+  let view = do
+        _ <- button "first"
+        r <- itemRect
+        hov <- itemHovered
+        _ <- row (button "a" >> button "b")
+        rowFocused <- itemFocused
+        rowActive <- itemActive
+        pure (r, hov, rowFocused, rowActive)
+  (r, idle, _, _) <- frame ctx id view
+  (_, over, _, _) <- frame ctx (at (rectX r + 2) (rectY r + 2)) view
+  assert "last item: hover wrong for the first button" (not idle && over)
+  rs <- readRects ctx
+  let b = last rs
+      onB = at (rectX b + 2) (rectY b + 2)
+  (_, _, focusedPress, activePress) <- frame ctx (onB . pressLeft) view
+  _ <- frame ctx (onB . releaseLeft) view
+  (_, _, focusedAfter, activeAfter) <- frame ctx id view
+  assert "last item: group did not report its pressed, focused child"
+    (activePress && focusedPress && focusedAfter && not activeAfter)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.
