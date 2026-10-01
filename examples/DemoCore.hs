@@ -79,16 +79,17 @@ demo = do
     v <- edit volume (\v m -> m {volume = v}) (\x -> slider x 0 1)
     nextWidth 80
     progressBar v
-  shown <- edit showPlot (\v m -> m {showPlot = v}) (checkbox "show plot")
-  vol <- gets volume
-  shape <- edit wave (\v m -> m {wave = v}) (radio [("sine", Sine), ("saw", Saw)])
-  let sample x = case shape of
-        Sine -> sin x
-        Saw -> x / pi - 2 * fromIntegral (floor (x / (2 * pi)) :: Int)
-  when shown $ do
-    nextWidth 220
-    nextHeight 80
-    plotLines [sample (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
+  panel "plot" $ do
+    shown <- edit showPlot (\v m -> m {showPlot = v}) (checkbox "show plot")
+    vol <- gets volume
+    shape <- edit wave (\v m -> m {wave = v}) (radio [("sine", Sine), ("saw", Saw)])
+    let sample x = case shape of
+          Sine -> sin x
+          Saw -> x / pi - 2 * fromIntegral (floor (x / (2 * pi)) :: Int)
+    when shown $ do
+      nextWidth 220
+      nextHeight 80
+      plotLines [sample (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
 
   newline
   hi <- edit salutation (\v m -> m {salutation = v})

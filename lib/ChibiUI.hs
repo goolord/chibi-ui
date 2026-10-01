@@ -79,6 +79,7 @@ module ChibiUI
   , table
   , treeNode
   , separator
+  , panel
   , contextMenu
   , tooltip
   , disabled
@@ -209,6 +210,7 @@ import ChibiUI.Internal.Widgets
   , selectableText
   , scrollColumn
   , separator
+  , panel
   , slider
   , table
   , treeNode

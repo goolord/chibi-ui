@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `panel title body`: a body under a dimmed title, inside a border
+  padded by a gap all round.
+
 - Added `fillWidth`: the next widget takes the rest of the line's width.
 
 - Added `edit getter setter widget`: show part of the model in a widget and
