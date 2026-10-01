@@ -21,6 +21,7 @@ module ChibiUI.Internal.Draw
   , newDrawArena
   , resetDrawArena
   , finishFrame
+  , quadCount
   , texAtlas
   , texImage
   , pushClip
@@ -142,6 +143,10 @@ resetDrawArena a = do
   writeIORef (daBatchTexture a) texAtlas
   writeURef (daBatchStart a) 0
   writeURef (daBatchCount a) 0
+
+-- | How many quads the frame has emitted so far.
+quadCount :: DrawArena -> IO Int
+quadCount a = (`quot` 4) <$> readURef (daVertexCount a)
 
 -- | Snapshot the frame. The arena must not be reset and emitted into again
 -- until the backend has rendered or copied the snapshot. Reading the open

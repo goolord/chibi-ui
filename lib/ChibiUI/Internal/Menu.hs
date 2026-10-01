@@ -1,17 +1,21 @@
 -- | The overlays painted after the normal view: one flat, window-clamped
--- context menu, and tooltips.
+-- context menu, tooltips, and a debug overlay.
 module ChibiUI.Internal.Menu
   ( contextMenu, openContextMenu, openPopup, processPopup, paintPopup
-  , tooltip, paintTooltip
+  , tooltip, paintTooltip, debugOverlay
   ) where
 
 import Control.Monad (forM_, unless, when)
+import Data.List (sortOn)
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
+import qualified Data.Text as T
 import ChibiUI.Internal.Context (Context (..), Popup (..), noWidget)
+import ChibiUI.Internal.Draw (quadCount)
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
+import ChibiUI.Internal.RectTable (rectTableToList)
 import ChibiUI.Internal.Store (tooltipHovers)
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Style
@@ -40,17 +44,38 @@ tooltip t = do
 paintTooltip :: ChibiUI model ()
 paintTooltip = do
   current <- readCtx ctxTooltip
-  forM_ current $ \(V2 px py, t) -> do
-    Size w h <- windowSize
-    tw <- measureText t
-    let bw = tw + widgetPad * 2
-        bh = lineHeight + widgetPad * 2
-        r = Rect (clamp 0 (max 0 (w - bw)) (px + 12)) (clamp 0 (max 0 (h - bh)) (py + 18)) bw bh
-    th <- theme
-    withClip r $ do
-      fillRectUI r (themeSurface th)
-      strokeRectUI r 1 (themeBorder th)
-      textInRect r t (themeText th)
+  forM_ current $ \(V2 px py, t) -> noteBox (V2 (px + 12) (py + 18)) t
+
+-- | A line of text in a bordered box at a point, moved inside the window.
+noteBox :: V2 -> Text -> ChibiUI model ()
+noteBox (V2 x y) t = do
+  Size w h <- windowSize
+  tw <- measureText t
+  let bw = tw + widgetPad * 2
+      bh = lineHeight + widgetPad * 2
+      r = Rect (clamp 0 (max 0 (w - bw)) x) (clamp 0 (max 0 (h - bh)) y) bw bh
+  th <- theme
+  withClip r $ do
+    fillRectUI r (themeSurface th)
+    strokeRectUI r 1 (themeBorder th)
+    textInRect r t (themeText th)
+
+-- | Outline every widget placed so far this frame, and label the smallest
+-- one under the pointer with its rect; the top-right corner counts the
+-- widgets and quads so far. Call it last in a view, to debug layout.
+debugOverlay :: ChibiUI model ()
+debugOverlay = do
+  ctx <- askContext
+  rects <- map snd <$> (readCtx ctxRects >>= liftIO . rectTableToList)
+  quads <- liftIO (quadCount (ctxArena ctx))
+  p <- mousePos
+  Size w _ <- windowSize
+  forM_ rects $ \r -> strokeRectUI r 1 (colorRGBA 255 0 255 140)
+  forM_ (listToMaybe (sortOn rectArea (filter (`rectHit` p) rects))) $ \r -> do
+    fillRectUI r (colorRGBA 255 0 255 40)
+    noteBox (V2 (rectX r) (rectY r + rectH r)) $
+      T.unwords [T.pack (show (round v :: Int)) | v <- [rectX r, rectY r, rectW r, rectH r]]
+  noteBox (V2 w 0) (T.pack (show (length rects) ++ " widgets, " ++ show quads ++ " quads"))
 
 -- | Attach a right-click menu to the preceding widget or group. Actions
 -- should update application state, rather than declare more widgets.

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added `debugOverlay`: called last in a view, it outlines every widget
+  placed this frame, labels the one under the pointer with its rect, and
+  counts the frame's widgets and quads in the top-right corner. The demo
+  toggles it with F12.
+
 - Added `labelWrapped text`: text wrapped at spaces to the line's width,
   or `nextWidth`, on as many lines as it needs.
 
