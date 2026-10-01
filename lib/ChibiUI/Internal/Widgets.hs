@@ -3,6 +3,7 @@
 module ChibiUI.Internal.Widgets
   ( label
   , labelDim
+  , labeled
   , selectableText
   , button
   , checkbox
@@ -48,6 +49,11 @@ label = labelWith themeText
 -- | One line of dimmed text, as a caption.
 labelDim :: Text -> ChibiUI model ()
 labelDim = labelWith themeTextDim
+
+-- | A caption and a widget in a row, the caption aligned with a field:
+-- @labeled "name" (textInput value)@.
+labeled :: Text -> ChibiUI model a -> ChibiUI model a
+labeled t body = row (alignTextToFrame >> label t >> body)
 
 labelWith :: (Theme -> Color) -> Text -> ChibiUI model ()
 labelWith color t = do

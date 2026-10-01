@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `labeled caption body`: a caption and a widget in a row, the
+  caption aligned with a field, in place of `row`, `alignTextToFrame` and
+  `label`.
+
 - Added `disabled flag body`: while the flag holds, the body's widgets draw
   dimmed and ignore the pointer and keyboard; Tab skips them and their
   context menus stay shut.
