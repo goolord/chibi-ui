@@ -44,6 +44,7 @@ main = do
   testPanel
   testTextInputHint
   testDragFloat
+  testLabelWrapped
   testTable
   testRaggedTable
   testPlotLines
@@ -696,6 +697,20 @@ testDragFloat = do
   stepped <- frame ctx (keys [KeyLeft]) view
   assert ("dragFloat: wrong values: " ++ show (pressed, dragged, far, released, stepped))
     (pressed == 1 && dragged == 6 && far == 201 && released == 201 && stepped == 200.5)
+
+-- Wrapped text takes a line per wrapped line, each within the width, and
+-- a newline always breaks.
+testLabelWrapped :: IO ()
+testLabelWrapped = do
+  ctx <- newTestContext
+  let text = "one two three four five six seven"
+  widest <- runChibiUI ctx (measureText "three")
+  _ <- frame ctx id (nextWidth (widest * 2) >> labelWrapped text)
+  wrapped <- bigRect =<< readRects ctx
+  _ <- frame ctx id (labelWrapped "short\nlines")
+  broken <- bigRect =<< readRects ctx
+  assert ("labelWrapped: wrong line counts: " ++ show (wrapped, broken))
+    (rectW wrapped == widest * 2 && rectH wrapped >= 16 * 3 && rectH broken == 16 * 2)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.

@@ -38,6 +38,7 @@ demo :: ChibiUI Model ()
 demo = do
   label "chibi-ui tour"
   separator
+  labelWrapped "Every widget chibi-ui has, in one window. Narrow the window to see this line wrap."
   space 4
 
   labeled "UI scale" $ do

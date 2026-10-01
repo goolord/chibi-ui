@@ -60,6 +60,7 @@ module ChibiUI
     -- * Widgets
   , label
   , labelDim
+  , labelWrapped
   , labeled
   , selectableText
   , button
@@ -207,6 +208,7 @@ import ChibiUI.Internal.Widgets
   , intInput
   , label
   , labelDim
+  , labelWrapped
   , labeled
   , plotLines
   , progressBar
