@@ -11,7 +11,9 @@ module ChibiUI.Internal.Types
   , colorFloats
   , clamp
   , clamp01
+  , clampSpan
   , roundHalfUp
+  , isFinite
   , validScale
   , rectNonEmpty
   , rectHit
@@ -20,6 +22,9 @@ module ChibiUI.Internal.Types
   , rectsOverlap
   , rectContains
   , rectInflate
+  , rectCutLeft
+  , rectClampInto
+  , rectBottomLeft
   , rectArea
   , v2Sub
   ) where
@@ -88,6 +93,12 @@ clamp lo hi x = max lo (min hi x)
 clamp01 :: Float -> Float
 clamp01 x = clamp 0 1 x
 
+-- | Keep an offset within what a @content@ extent can move through a
+-- @view@ extent: 0 up to their difference, or 0 when the view is larger.
+{-# INLINE clampSpan #-}
+clampSpan :: Float -> Float -> Float -> Float
+clampSpan content view = clamp 0 (max 0 (content - view))
+
 -- | Round to the nearest integer, ties up: the device-pixel rounding shared
 -- by layout and glyph pens. Not ties-to-even (@round@): at a fractional
 -- scale, ties-to-even makes a column of same-sized rows land alternately
@@ -98,9 +109,14 @@ roundHalfUp r =
   let f = floor r
    in if r - fromIntegral f >= 0.5 then f + 1 else f
 
+-- | Neither NaN nor infinite.
+{-# INLINE isFinite #-}
+isFinite :: RealFloat a => a -> Bool
+isFinite x = not (isNaN x || isInfinite x)
+
 -- | Whether a UI scale is usable: finite and positive.
 validScale :: Float -> Bool
-validScale s = s > 0 && not (isNaN s || isInfinite s)
+validScale s = s > 0 && isFinite s
 
 -- | Whether both width and height are strictly positive.
 {-# INLINE rectNonEmpty #-}
@@ -153,6 +169,22 @@ rectContains (Rect x y w h) (Rect x' y' w' h') =
 rectInflate :: Float -> Rect -> Rect
 rectInflate pad (Rect x y w h) =
   Rect (x - pad) (y - pad) (w + pad * 2) (h + pad * 2)
+
+-- | Drop @d@ from the left edge, keeping the right edge where it is.
+{-# INLINE rectCutLeft #-}
+rectCutLeft :: Float -> Rect -> Rect
+rectCutLeft d r = r {rectX = rectX r + d, rectW = max 0 (rectW r - d)}
+
+-- | Move a rectangle the least distance that puts it inside a @w@ x @h@
+-- area at the origin; one larger than the area keeps its top-left there.
+{-# INLINE rectClampInto #-}
+rectClampInto :: Size -> Rect -> Rect
+rectClampInto (Size w h) (Rect x y rw rh) = Rect (clampSpan w rw x) (clampSpan h rh y) rw rh
+
+-- | The bottom-left corner, as a menu below a widget opens from.
+{-# INLINE rectBottomLeft #-}
+rectBottomLeft :: Rect -> V2
+rectBottomLeft r = V2 (rectX r) (rectY r + rectH r)
 
 -- | Width times height. Requires non-negative dimensions for a geometric area.
 {-# INLINE rectArea #-}

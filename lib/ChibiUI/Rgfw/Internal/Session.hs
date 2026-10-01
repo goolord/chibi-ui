@@ -141,12 +141,11 @@ runChibiApp opts initial view = inBoundThread $
       lastFrameRef <- newIORef now0
       let syncCursor = do
             want <- readIORef (ctxCursor ctx)
-            syncCursorKind cursorRef (R.showMouse win) (setIcon . mapRgfwCursor) want
-          setIcon icon =
-            void $
-              if icon == R.rgfw_mouseArrow
-                then R.setMouseDefault win
-                else R.setMouseStandard win icon
+            syncCursorKind cursorRef (R.showMouse win) setIcon want
+          setIcon kind = void $ case kind of
+            UiCursorPointer -> R.setMouseStandard win R.rgfw_mousePointingHand
+            UiCursorText -> R.setMouseStandard win R.rgfw_mouseIbeam
+            _ -> R.setMouseDefault win
           -- Fold the queued events into the input; 'True' when the window
           -- was asked to close.
           drainEvents closed = do
@@ -300,14 +299,6 @@ keypadRgfwKeys =
 
 modsFromRgfw :: Word8 -> Modifiers
 modsFromRgfw m = modifiersFromBits m R.rgfw_modShift R.rgfw_modControl R.rgfw_modAlt R.rgfw_modSuper
-
--- | The RGFW standard cursor for a cursor kind. 'R.rgfw_mouseArrow' stands
--- for the platform's default arrow.
-mapRgfwCursor :: UiCursorKind -> Word8
-mapRgfwCursor = \case
-  UiCursorPointer -> R.rgfw_mousePointingHand
-  UiCursorText -> R.rgfw_mouseIbeam
-  _ -> R.rgfw_mouseArrow
 
 -- | What the event queue has told the session between frames: the input,
 -- which persists from frame to frame with one-shot events cleared, and the

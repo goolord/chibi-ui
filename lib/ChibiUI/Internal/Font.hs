@@ -161,7 +161,7 @@ fontSetScale f scale = do
   let scale' = if validScale scale then scale else 1
   old <- readIORef (fState f)
   when (scale' /= fsScale old) $ do
-    when (fsHandle old /= nullPtr) (c_free (fsHandle old))
+    freeState old
     writeIORef (fState f) =<< loadState (fBytes f) scale'
 
 -- | A fresh C font and empty glyph caches at a valid UI scale.
@@ -200,8 +200,12 @@ fontScale f = fsScale <$> readIORef (fState f)
 fontFree :: Font -> IO ()
 fontFree f = do
   st <- readIORef (fState f)
-  when (fsHandle st /= nullPtr) (c_free (fsHandle st))
+  freeState st
   writeIORef (fState f) st {fsHandle = nullPtr}
+
+-- | Free a state's C font, if it has one.
+freeState :: FontState -> IO ()
+freeState st = when (fsHandle st /= nullPtr) (c_free (fsHandle st))
 
 -- | The width of one line of text, in logical pixels: the sum of glyph
 -- advances. Newlines advance nothing. Measuring rasterizes the glyphs, so

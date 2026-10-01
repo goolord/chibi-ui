@@ -19,7 +19,6 @@ module ChibiUI.Internal.Input
   , emptyInput
   , inputInteracted
   , inputPointerHeld
-  , appendInputKey
   , applyKey
   , releaseAllKeys
   , keypadKey
@@ -27,12 +26,7 @@ module ChibiUI.Internal.Input
   , mouseButtonNumber
   , MouseButtons
   , noButtons
-  , buttonsMember
-  , buttonsToList
   , buttonsFromList
-  , buttonsNull
-  , buttonsInsert
-  , buttonsDelete
   , applyMouseButton
   , applyPointerLeave
   , UiCursorKind (..)

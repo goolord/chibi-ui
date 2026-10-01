@@ -18,16 +18,18 @@ import ChibiUI.Internal.Menu (processPopup, paintPopup, paintTooltip)
 import ChibiUI.Internal.Layout (beginViewport)
 import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
-import ChibiUI.Internal.Types (Rect (..), Size (..))
+import ChibiUI.Internal.Types (Rect (..), Size (..), rectInflate)
 
 -- | Run one frame: reset the frame state, run the view, then resolve focus
 -- (Tab, click-to-unfocus) and snapshot the draw list. The window
 -- background is the caller's clear; the view draws everything else.
 runFrame :: Context model -> Input -> ChibiUI model a -> IO (a, DrawData)
 runFrame ctx inp view = do
-  readIORef (ctxRects ctx) >>= clearRectTable
+  clearRectTable (ctxRects ctx)
   resetDrawArena (ctxArena ctx)
-  pushClip (ctxArena ctx) (Rect 0 0 (sizeW (inputWindowSize inp)) (sizeH (inputWindowSize inp)))
+  let Size winW winH = inputWindowSize inp
+      window = Rect 0 0 winW winH
+  pushClip (ctxArena ctx) window
   writeIORef (ctxFocusRequested ctx) False
   writeIORef (ctxFocusables ctx) []
   writeIORef (ctxCursor ctx) UiCursorDefault
@@ -43,9 +45,7 @@ runFrame ctx inp view = do
   writeIORef (ctxTime ctx) t
   -- Start the cursor at the window's content origin.
   theme0 <- readIORef (ctxTheme ctx)
-  let pad = themeWindowPad theme0
-      Size winW winH = inputWindowSize inp
-  writeIORef (ctxLayout ctx) (beginViewport (Rect pad pad (winW - pad * 2) (winH - pad * 2)))
+  writeIORef (ctxLayout ctx) (beginViewport (rectInflate (negate (themeWindowPad theme0)) window))
   focusBefore <- readIORef (ctxFocus ctx)
   blocked <- runChibiUI ctx processPopup
   writeIORef (ctxInputBlocked ctx) blocked
@@ -64,8 +64,9 @@ runFrame ctx inp view = do
 
   -- Focus resolves after painting. Settle the old/new field visuals and
   -- drafts even when the user produces no further native event.
-  when (focusAfter /= focusBefore) (modifyIORef' (ctxWake ctx) (min WakeSoon))
-  runChibiUI ctx (paintTooltip >> paintPopup inp)
+  runChibiUI ctx $ do
+    when (focusAfter /= focusBefore) requestFrame
+    paintTooltip >> paintPopup inp
   dd <- finishFrame (ctxArena ctx)
   pure (a, dd)
 

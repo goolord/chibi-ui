@@ -11,6 +11,7 @@ module ChibiUI.Internal.Layout
   , stepLayout
   , placeLayout
   , remainingWidth
+  , nextOrRemainingWidth
   , remainingHeight
   , beginGroup
   , endGroup
@@ -141,6 +142,11 @@ placeLayout gap sz ls = (r, ls
 remainingWidth :: LayoutState -> Float
 remainingWidth ls = max 0 (lsIndent ls + lsAvailW ls - lsPenX ls)
 
+-- | The width the next widget will get: a pending 'NextWidth', or the
+-- rest of the line.
+nextOrRemainingWidth :: LayoutState -> Float
+nextOrRemainingWidth ls = fromMaybe (remainingWidth ls) (lsNextW ls)
+
 remainingHeight :: LayoutState -> Float
 remainingHeight ls = max 0 (lsBottom ls - lsLineY ls)
 
@@ -148,7 +154,7 @@ remainingHeight ls = max 0 (lsBottom ls - lsLineY ls)
 beginGroup :: Bool -> LayoutState -> LayoutState
 beginGroup horizontal ls =
   scopeAt (if horizontal then Flowing else Stacked) (lsPenX ls) (lsLineY ls)
-    (fromMaybe (remainingWidth ls) (lsNextW ls))
+    (nextOrRemainingWidth ls)
     (maybe (lsBottom ls) (lsLineY ls +) (lsNextH ls))
 
 -- | Leave a group: its size, from where it began in the parent, and the
