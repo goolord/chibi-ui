@@ -3,6 +3,7 @@
 module ChibiUI.Internal.Widgets
   ( label
   , labelDim
+  , labelWrapped
   , labeled
   , selectableText
   , button
@@ -54,6 +55,31 @@ label = labelWith themeText
 -- | One line of dimmed text, as a caption.
 labelDim :: Text -> ChibiUI model ()
 labelDim = labelWith themeTextDim
+
+-- | Text wrapped at spaces to fit the line's width, or 'nextWidth', on as
+-- many lines as it needs; a newline starts a new line. A word wider than
+-- the line overflows it.
+labelWrapped :: Text -> ChibiUI model ()
+labelWrapped t = do
+  ls <- readLayout
+  let width = fromMaybe (Layout.remainingWidth ls) (Layout.lsNextW ls)
+  lines' <- concat <$> mapM (wrapLine width) (T.splitOn "\n" t)
+  (_, r) <- widgetRect (pure (Size width (lineHeight * fromIntegral (length lines'))))
+  th <- theme
+  forM_ (zip [0 ..] lines') $ \(k, line) ->
+    drawTextIn (r {rectY = rectY r + k * lineHeight, rectH = lineHeight}) line (themeText th)
+
+-- | One line of text broken greedily at spaces into lines @width@ wide.
+wrapLine :: Float -> Text -> ChibiUI model [Text]
+wrapLine width line = case T.words line of
+  [] -> pure [""]
+  w : ws -> fill w ws
+  where
+    fill current [] = pure [current]
+    fill current (w : ws) = do
+      let longer = current <> " " <> w
+      fits <- (<= width) <$> measureText longer
+      if fits then fill longer ws else (current :) <$> fill w ws
 
 -- | A caption and a widget in a row, the caption aligned with a field:
 -- @labeled "name" (textInput value)@.

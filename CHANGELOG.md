@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `labelWrapped text`: text wrapped at spaces to the line's width,
+  or `nextWidth`, on as many lines as it needs.
+
 - Added `dragFloat value speed`: a number to drag, changing by `speed` per
   pixel the pointer moves right or left of where it pressed.
 
