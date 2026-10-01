@@ -22,11 +22,11 @@ module ChibiUI.Internal.Damage
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CSize (..))
-import Foreign.ForeignPtr (ForeignPtr, mallocForeignPtrBytes, withForeignPtr)
+import Foreign.ForeignPtr (ForeignPtr, withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peekByteOff)
-import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, vertexSize)
+import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), newBuffer, quadBytes, vertexSize)
 import ChibiUI.Internal.Types
   ( Rect (..)
   , Size (..)
@@ -104,7 +104,7 @@ copyInto old dd = do
     Just snap | snapCapacity snap >= len -> pure (snapBuffer snap, snapCapacity snap)
     _ -> do
       let cap = max len (maybe 0 ((* 2) . snapCapacity) old)
-      fp <- mallocForeignPtrBytes (max 1 cap)
+      fp <- newBuffer cap
       pure (fp, cap)
   withForeignPtr buf $ \dst ->
     withForeignPtr (drawVertices dd) $ \src -> copyBytes dst src len

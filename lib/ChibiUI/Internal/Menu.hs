@@ -6,16 +6,16 @@ module ChibiUI.Internal.Menu
   ) where
 
 import Control.Monad (forM_, unless, when)
+import Control.Monad.Reader (ask)
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import ChibiUI.Internal.Context (Context (..), Popup (..), noWidget)
+import ChibiUI.Internal.Context (Context (..), Popup (..), frameRects, noWidget)
 import ChibiUI.Internal.Draw (quadCount)
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
-import ChibiUI.Internal.RectTable (rectTableToList)
 import ChibiUI.Internal.Store (tooltipHovers)
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Style
@@ -49,11 +49,9 @@ paintTooltip = do
 -- | A line of text in a bordered box at a point, moved inside the window.
 noteBox :: V2 -> Text -> ChibiUI model ()
 noteBox (V2 x y) t = do
-  Size w h <- windowSize
-  tw <- measureText t
-  let bw = tw + widgetPad * 2
-      bh = lineHeight + widgetPad * 2
-      r = Rect (clamp 0 (max 0 (w - bw)) x) (clamp 0 (max 0 (h - bh)) y) bw bh
+  win <- windowSize
+  Size bw bh <- paddedText t
+  let r = rectClampInto win (Rect x y bw bh)
   th <- theme
   withClip r $ do
     fillRectUI r (themeSurface th)
@@ -65,15 +63,15 @@ noteBox (V2 x y) t = do
 -- widgets and quads so far. Call it last in a view, to debug layout.
 debugOverlay :: ChibiUI model ()
 debugOverlay = do
-  ctx <- askContext
-  rects <- map snd <$> (readCtx ctxRects >>= liftIO . rectTableToList)
+  ctx <- ask
+  rects <- map snd <$> liftIO (frameRects ctx)
   quads <- liftIO (quadCount (ctxArena ctx))
   p <- mousePos
   Size w _ <- windowSize
   forM_ rects $ \r -> strokeRectUI r 1 (colorRGBA 255 0 255 140)
   forM_ (listToMaybe (sortOn rectArea (filter (`rectHit` p) rects))) $ \r -> do
     fillRectUI r (colorRGBA 255 0 255 40)
-    noteBox (V2 (rectX r) (rectY r + rectH r)) $
+    noteBox (rectBottomLeft r) $
       T.unwords [T.pack (show (round v :: Int)) | v <- [rectX r, rectY r, rectW r, rectH r]]
   noteBox (V2 w 0) (T.pack (show (length rects) ++ " widgets, " ++ show quads ++ " quads"))
 
@@ -95,17 +93,17 @@ openContextMenu wid r items = do
   inp <- getInput
   hov <- hovered r
   focus <- readCtx ctxFocus
-  focusRect <- lookupWidgetRect focus
-  let focused = focus == wid || (focus /= noWidget && maybe False (rectContains r) focusRect)
+  within <- holdsWithin r ctxFocus
+  let focused = focus == wid || within
       keyboard = focused && modShift (inputModifiers inp) && pressedIn (KeyF 10) inp
   when (not (null items) && ((hov && pressedIn MouseRight inp) || keyboard)) $
-    openPopup wid (if keyboard then V2 (rectX r) (rectY r + rectH r) else inputMousePos inp) items
+    openPopup wid (if keyboard then rectBottomLeft r else inputMousePos inp) items
 
 -- | Open a menu of @items@ at a point, for a widget: it closes when the
 -- widget stops being declared. The first enabled item starts selected.
 openPopup :: WidgetId -> V2 -> [(Text, Bool, ChibiUI model ())] -> ChibiUI model ()
 openPopup wid position items = do
-  ctx <- askContext
+  ctx <- ask
   inp <- getInput
   let actions = [(t, enabled, runChibiUI ctx action) | (t, enabled, action) <- items]
       selected = firstOr (enabledIndices items)
@@ -124,13 +122,13 @@ firstOr = fromMaybe (-1) . listToMaybe
 
 geometry :: Popup -> ChibiUI model (Rect, Float)
 geometry popup = do
-  Size w h <- windowSize
+  win@(Size w h) <- windowSize
   widths <- mapM (measureText . (\(t, _, _) -> t)) (popupItems popup)
   let V2 x y = popupPosition popup
       width = min w (maximum (120 : map (+ 20) widths))
       rowH = min (lineHeight + 10) (max 0 ((h - 2) / fromIntegral (length widths)))
       height = min h (2 + rowH * fromIntegral (length widths))
-  pure (Rect (clamp 0 (max 0 (w - width)) x) (clamp 0 (max 0 (h - height)) y) width height, rowH)
+  pure (rectClampInto win (Rect x y width height), rowH)
 
 rowAt :: Rect -> Float -> Input -> Maybe Int
 rowAt r height inp

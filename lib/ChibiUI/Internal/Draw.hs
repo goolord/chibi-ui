@@ -32,6 +32,7 @@ module ChibiUI.Internal.Draw
   , emitQuadUV
   , vertexSize
   , quadBytes
+  , newBuffer
   ) where
 
 import Control.Monad (when)

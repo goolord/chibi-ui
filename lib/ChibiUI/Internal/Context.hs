@@ -73,7 +73,7 @@ data Context model = Context
   , ctxTheme :: !(IORef Theme)
   , ctxInput :: !(IORef Input)
   , ctxStore :: !(IORef WidgetStore)
-  , ctxRects :: !(IORef RectTable)
+  , ctxRects :: !RectTable
   -- ^ This frame's widget rects, keyed by hashed id, for hit tests. The
   -- frame start clears it.
   , ctxFocus :: !(IORef WidgetId)
@@ -149,7 +149,7 @@ newContext initial = do
   ctxTheme <- newIORef defaultTheme
   ctxInput <- newIORef emptyInput
   ctxStore <- newIORef emptyWidgetStore
-  ctxRects <- newIORef =<< newRectTable
+  ctxRects <- newRectTable
   ctxFocus <- newIORef noWidget
   ctxFocusRequested <- newIORef False
   ctxFocusables <- newIORef []
@@ -197,4 +197,4 @@ contextInput = readIORef . ctxInput
 
 -- | Recorded widget geometry for hosts and tests.
 frameRects :: Context model -> IO [(Int, Rect)]
-frameRects ctx = readIORef (ctxRects ctx) >>= rectTableToList
+frameRects ctx = rectTableToList (ctxRects ctx)

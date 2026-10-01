@@ -61,8 +61,7 @@ labelDim = labelWith themeTextDim
 -- the line overflows it.
 labelWrapped :: Text -> ChibiUI model ()
 labelWrapped t = do
-  ls <- readLayout
-  let width = fromMaybe (Layout.remainingWidth ls) (Layout.lsNextW ls)
+  width <- Layout.nextOrRemainingWidth <$> readLayout
   lines' <- concat <$> mapM (wrapLine width) (T.splitOn "\n" t)
   (_, r) <- widgetRect (pure (Size width (lineHeight * fromIntegral (length lines'))))
   th <- theme
@@ -70,16 +69,21 @@ labelWrapped t = do
     drawTextIn (r {rectY = rectY r + k * lineHeight, rectH = lineHeight}) line (themeText th)
 
 -- | One line of text broken greedily at spaces into lines @width@ wide.
+-- Each word is measured once and a line is joined only once it closes,
+-- so a paragraph costs time linear in its length.
 wrapLine :: Float -> Text -> ChibiUI model [Text]
 wrapLine width line = case T.words line of
   [] -> pure [""]
-  w : ws -> fill w ws
+  ws -> do
+    spaceW <- measureText " "
+    sized <- mapM (\w -> (,) w <$> measureText w) ws
+    pure (go spaceW [] 0 sized)
   where
-    fill current [] = pure [current]
-    fill current (w : ws) = do
-      let longer = current <> " " <> w
-      fits <- (<= width) <$> measureText longer
-      if fits then fill longer ws else (current :) <$> fill w ws
+    go _ acc _ [] = [T.unwords (reverse acc)]
+    go spaceW [] _ ((w, ww) : more) = go spaceW [w] ww more
+    go spaceW acc x ((w, ww) : more)
+      | x + spaceW + ww <= width = go spaceW (w : acc) (x + spaceW + ww) more
+      | otherwise = T.unwords (reverse acc) : go spaceW [w] ww more
 
 -- | A caption and a widget in a row, the caption aligned with a field:
 -- @labeled "name" (textInput value)@.
@@ -106,14 +110,9 @@ button :: Text -> ChibiUI model Bool
 button t = do
   (_, r, i) <- interactive clickable (paddedText t)
   th <- theme
-  fillRectUI r (surfaceFor th i)
-  frameBorder th r (iFocused i)
+  framedSurface th r i
   textInRect r t (themeText th)
   pure (iClicked i)
-
--- | A line of text and a widget's padding around it.
-paddedText :: Text -> ChibiUI model Size
-paddedText t = (\(Size w h) -> Size (w + widgetPad * 2) (h + widgetPad * 2)) <$> textSize t
 
 -- | A box with a caption beside it. Click it, or press Enter/Space while
 -- it is focused, to flip it; returns the value it now holds.
@@ -139,8 +138,7 @@ tabs titles selected = row $ do
   clicks <- forM (zip [0 ..] titles) $ \(k, t) -> do
     (_, r, i) <- interactive clickable (paddedText t)
     th <- theme
-    when (iHovered i || iActive i) (fillRectUI r (surfaceFor th i))
-    focusRing th r (iFocused i)
+    flatSurface th r i
     textInRect r t (if k == selected then themeText th else themeTextDim th)
     when (k == selected) (fillRectUI (r {rectY = rectY r + rectH r - 2, rectH = 2}) (themeAccent th))
     pure (if iClicked i then Just k else Nothing)
@@ -161,12 +159,11 @@ combo options value = do
   (wid, r, i) <- interactive clickable (fieldSize 160)
   picked <- widgetState comboPicks wid
   when (isJust picked) (setWidgetState comboPicks wid Nothing)
-  when (iClicked i) $ openPopup wid (V2 (rectX r) (rectY r + rectH r))
+  when (iClicked i) $ openPopup wid (rectBottomLeft r)
     [(t, True, setWidgetState comboPicks wid (Just k)) | (k, (t, _)) <- zip [0 ..] options]
   let chosen = maybe value snd (listToMaybe . (`drop` options) =<< picked)
   th <- theme
-  fillRectUI r (surfaceFor th i)
-  frameBorder th r (iFocused i)
+  framedSurface th r i
   drawTextIn (rectInflate (-widgetPad) r) (maybe "" fst (find ((== chosen) . snd) options)) (themeText th)
   -- A small downward triangle at the right edge.
   let ax = rectX r + rectW r - widgetPad - 8
@@ -185,10 +182,9 @@ markBox t marked = do
   th <- theme
   let box = Rect (rectX r) (rectY r + widgetPad) lineHeight lineHeight
       caption = lineHeight + widgetPad
-  fillRectUI box (surfaceFor th i)
-  frameBorder th box (iFocused i)
+  framedSurface th box i
   when (marked (iClicked i)) (fillRectUI (rectInflate (-4) box) (themeAccent th))
-  drawTextIn (r {rectX = rectX r + caption, rectW = max 0 (rectW r - caption)}) t (themeText th)
+  drawTextIn (rectCutLeft caption r) t (themeText th)
   pure (iClicked i)
 
 -- | The surface under a widget: pressed, hovered, or at rest.
@@ -205,6 +201,17 @@ frameBorder th r focused = strokeRectUI r 1 (if focused then themeAccent th else
 -- | A 1px accent border while focused, for widgets with no border at rest.
 focusRing :: Theme -> Rect -> Bool -> ChibiUI model ()
 focusRing th r focused = when focused (strokeRectUI r 1 (themeAccent th))
+
+-- | A bordered widget's surface and border, as buttons and boxes draw.
+framedSurface :: Theme -> Rect -> Interaction -> ChibiUI model ()
+framedSurface th r i = fillRectUI r (surfaceFor th i) >> frameBorder th r (iFocused i)
+
+-- | A flat widget's surface, shown only while hovered or pressed, and its
+-- focus ring, as tab headers and tree nodes draw.
+flatSurface :: Theme -> Rect -> Interaction -> ChibiUI model ()
+flatSurface th r i = do
+  when (iHovered i || iActive i) (fillRectUI r (surfaceFor th i))
+  focusRing th r (iFocused i)
 
 -- | What the pointer and keyboard did to a widget this frame, and the
 -- frame's input, for the rest of what the widget reads.
@@ -276,9 +283,7 @@ interactive p measure = do
 -- one layout group, so opening it never changes the identity of later siblings.
 treeNode :: Text -> ChibiUI model () -> ChibiUI model ()
 treeNode title body = column $ do
-  (wid, r, i) <- interactive clickable $ do
-    width <- availWidth
-    pure (Size width (lineHeight + widgetPad * 2))
+  (wid, r, i) <- interactive clickable (fullWidth (lineHeight + widgetPad * 2))
   let gutter = lineHeight + widgetPad
   wasOpen <- isJust <$> widgetState treeOpen wid
   let open = fromMaybe (if iClicked i then not wasOpen else wasOpen)
@@ -288,13 +293,12 @@ treeNode title body = column $ do
     requestFrame
   th <- theme
   withClip r $ do
-    when (iHovered i || iActive i) (fillRectUI r (surfaceFor th i))
-    focusRing th r (iFocused i)
+    flatSurface th r i
     let x = rectX r + gutter / 2
         y = rectY r + rectH r / 2
     fillRectUI (Rect (x - 4.5) (y - 0.5) 9 1) (themeTextDim th)
     when (not open) (fillRectUI (Rect (x - 0.5) (y - 4.5) 1 9) (themeTextDim th))
-    drawTextIn (r {rectX = rectX r + gutter, rectW = max 0 (rectW r - gutter)}) title (themeText th)
+    drawTextIn (rectCutLeft gutter r) title (themeText th)
   when open (indent gutter body)
 
 -- | A single-line text field. Pass the current value and keep the result:
@@ -314,7 +318,7 @@ textInputHint hint value = do
   focused <- itemFocused
   when (T.null v && not focused) $ do
     th <- theme
-    drawTextIn (rectInflate (-fieldPad) r) hint (themeTextDim th)
+    drawTextIn (fieldInner SingleLine r) hint (themeTextDim th)
   pure v
 
 -- | A multiline field, five lines tall by default. Enter inserts a newline;
@@ -355,6 +359,10 @@ fieldSize width = cappedSize width fieldHeight
 -- | @w@ by @h@, narrowed to the width left on the line.
 cappedSize :: Float -> Float -> ChibiUI model Size
 cappedSize w h = (\avail -> Size (min avail w) h) <$> availWidth
+
+-- | The rest of the line's width, @h@ tall.
+fullWidth :: Float -> ChibiUI model Size
+fullWidth h = flip Size h <$> availWidth
 
 -- | A horizontal slider for @value@ between @lo@ and @hi@: drag the thumb
 -- or click the track to set it, and Left/Right step a focused slider by a
@@ -409,10 +417,9 @@ dragFloat value speed = do
         | Just (x0, v0) <- grab, heldIn MouseLeft inp = v0 + (x - x0) * speed
         | Just d <- focusedKey i [(KeyLeft, -speed), (KeyRight, speed)] = value + d
         | otherwise = value
-  when (grab /= saved) (setWidgetState dragGrabs wid grab)
+  updateWidgetState dragGrabs wid saved grab
   th <- theme
-  fillRectUI r (surfaceFor th i)
-  frameBorder th r (iFocused i)
+  framedSurface th r i
   textInRect r (twoPlaces moved) (themeText th)
   pure moved
 
@@ -574,7 +581,6 @@ editStep mode i r saved ed0 = do
       multiline = mode == MultiLine
       hov = iHovered i
       active = iActive i
-      pressed = hov && pressedIn MouseLeft inp
       t = editorText ed0
       inner = fieldInner mode r
       V2 offset offsetY = fieldScroll saved
@@ -588,7 +594,9 @@ editStep mode i r saved ed0 = do
           lineIndex = clamp 0 (length ls - 1) (floor ((py - rectY inner + offsetY) / lineHeight))
           (start, line) = if multiline then ls !! lineIndex else (0, t)
       caret <- (start +) <$> hitCaret line (px - rectX inner + offset)
-      let anchor = if pressed && not (modShift (inputModifiers inp)) then caret else editAnchor (editState ed0)
+      let anchor = case gesture of
+            ClickSelection _ | not (modShift (inputModifiers inp)) -> caret
+            _ -> editAnchor (editState ed0)
           pointed = select anchor caret ed0
       pure $ case gesture of
         ClickSelection press@(ClickState _ _ clicks) ->
@@ -661,10 +669,10 @@ fieldLayout mode r ed focused reveal old = do
   -- Only a scroll right of the start needs the widest line to clamp it.
   x <- if wantX <= 0 then pure 0 else do
     widths <- mapM (measureText . snd) ls
-    pure (clampScroll (maximum (0 : widths) + 1) (rectW inner) wantX)
+    pure (clampSpan (maximum (0 : widths) + 1) (rectW inner) wantX)
   let y
         | not multiline = 0
-        | otherwise = clampScroll (fromIntegral (length ls) * lineHeight) (rectH inner) $
+        | otherwise = clampSpan (fromIntegral (length ls) * lineHeight) (rectH inner) $
             if focused && reveal
               then keepVisible (fromIntegral caretRow * lineHeight) lineHeight (rectH inner) wheelY
               else wheelY
@@ -811,15 +819,22 @@ table headers rows = do
         | pressedIn MouseLeft inp, Just h <- hoverI, h >= 0 && h < n = Just h
         | Just d <- focusedKey ia [(KeyDown, 1), (KeyUp, -1)] = step d
         | otherwise = current
-  when (selected /= stored) (setWidgetState tableSelection wid selected)
+  updateWidgetState tableSelection wid stored selected
   withClip r $ do
     drawRow (rectY r) headers (themeSurface th)
-    forM_ (zip3 [0 ..] (iterate (+ rowH) (rectY r + rowH)) cells) $ \(i, y, line) -> do
+    -- Only the rows the clip shows: a long table in a scroll region costs
+    -- its visible rows to draw, not all of them.
+    Rect _ clipY _ clipH <- currentClipRect
+    let firstRow = max 0 (floor ((clipY - rectY r) / rowH) - 1)
+        lastRow = ceiling ((clipY + clipH - rectY r) / rowH)
+        shown = take (lastRow - firstRow) (drop firstRow cells)
+        rowY k = rectY r + rowH * fromIntegral (k + 1)
+    forM_ (zip [firstRow ..] shown) $ \(i, line) -> do
       let bg | selected == Just i = themeSurfaceActive th
              | hoverI == Just i = themeRowHover th
              | odd i = themeRowAlt th
              | otherwise = themeWindow th
-      drawRow y line bg
+      drawRow (rowY i) line bg
     focusRing th r (iFocused ia)
   pure selected
 
@@ -837,7 +852,7 @@ scrollColumn body = do
       trackR = Rect (rectX r + rectW r - barW) (rectY r) barW (rectH r)
   -- The extent is last frame's: the body has not run yet.
   saved@(ScrollState scroll0 extent grab0) <- fromMaybe (ScrollState 0 0 0) <$> widgetState scrollRegions wid
-  wheeled <- clampScroll extent (rectH r) . v2Y <$> wheelScroll r (V2 0 scroll0)
+  wheeled <- clampSpan extent (rectH r) . v2Y <$> wheelScroll r (V2 0 scroll0)
   -- The scrollbar takes the pointer where it showed last frame.
   barHov <- if extent > rectH r then hovered trackR else pure False
   inp <- getInput
@@ -854,7 +869,7 @@ scrollColumn body = do
       travel = rectH r - thumbH0
       offset
         | dragging && travel > 0 =
-            clampScroll extent (rectH r) ((py - grab - rectY r) / travel * (extent - rectH r))
+            clampSpan extent (rectH r) ((py - grab - rectY r) / travel * (extent - rectH r))
         | otherwise = wheeled
   let viewport = r {rectW = max 0 (rectW r - barW)}
       content = viewport {rectY = rectY r - offset}
@@ -863,9 +878,9 @@ scrollColumn body = do
     (\parent inner -> (Layout.contentSize (V2 (rectX content) (rectY content)) inner, parent))
     (withClip viewport body)
   let maxScroll = max 0 (contentH - rectH r)
-      scroll1 = clampScroll contentH (rectH r) offset
+      scroll1 = clampSpan contentH (rectH r) offset
       next = ScrollState scroll1 contentH grab
-  when (next /= saved) (setWidgetState scrollRegions wid (Just next))
+  updateWidgetState scrollRegions wid (Just saved) (Just next)
   -- A shrunk body moved the clamp: settle the new offset on screen.
   when (scroll1 /= offset) requestFrame
   -- A scrollbar when the body overflows, brighter while hovered or dragged.
@@ -898,11 +913,6 @@ wheelScroll r offset@(V2 x y) = do
   V2 dx dy <- scrollDelta
   pure (if hov then V2 (x + dx * scrollStep) (y + dy * scrollStep) else offset)
 
--- | Keep an offset within what a @content@ extent can scroll through a
--- @view@ extent.
-clampScroll :: Float -> Float -> Float -> Float
-clampScroll content view = clamp 0 (max 0 (content - view))
-
 -- | A body under a dimmed title, inside a 1px border with a gap of padding
 -- all round. It fills the line's width, or takes 'nextWidth'.
 panel :: Text -> ChibiUI model a -> ChibiUI model a
@@ -924,7 +934,7 @@ panel title body = do
 -- a section.
 separatorText :: Text -> ChibiUI model ()
 separatorText t = do
-  (_, r) <- widgetRect ((\w -> Size w lineHeight) <$> availWidth)
+  (_, r) <- widgetRect (fullWidth lineHeight)
   th <- theme
   tw <- measureText t
   drawTextIn r t (themeTextDim th)
@@ -934,6 +944,6 @@ separatorText t = do
 -- | A 1px horizontal rule across the line's width.
 separator :: ChibiUI model ()
 separator = do
-  (_, r) <- widgetRect ((\w -> Size w 1) <$> availWidth)
+  (_, r) <- widgetRect (fullWidth 1)
   th <- theme
   fillRectUI r (themeBorder th)

@@ -10,19 +10,16 @@ module ChibiUI.Internal.Monad
   , mapModel
   , edit
   , runChibiUI
-  , askContext
   , readCtx
   , writeCtx
-  , modifyCtx
   , liftIO
   -- * Widget identity
   , nextId
-  , scoped
   , withKey
   -- * Widget state
   , widgetState
   , setWidgetState
-  , slotOf
+  , updateWidgetState
   -- * Application model
   , get
   , gets
@@ -31,11 +28,11 @@ module ChibiUI.Internal.Monad
   , modify'
   -- * Placement
   , place
-  , layoutState
   , layoutScope
   , readLayout
   , availWidth
   , textSize
+  , paddedText
   , measureText
   , sameLine
   , newline
@@ -78,6 +75,7 @@ module ChibiUI.Internal.Monad
   , itemHovered
   , itemFocused
   , itemActive
+  , holdsWithin
   -- * Drawing
   , theme
   , withTheme
@@ -87,6 +85,7 @@ module ChibiUI.Internal.Monad
   , alignTextToFrame
   , drawIO
   , withClip
+  , currentClipRect
   , fillRectUI
   , strokeRectUI
   , drawTextIn
@@ -102,7 +101,7 @@ module ChibiUI.Internal.Monad
   ) where
 
 import Control.Monad.IO.Class (MonadIO (..))
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks, withReaderT)
 import Control.Monad.State.Class (MonadState (..), gets, modify, modify')
 import qualified Data.ByteString as BS
@@ -125,7 +124,7 @@ import ChibiUI.Internal.Layout (LayoutState)
 import qualified ChibiUI.Internal.Layout as Layout
 import ChibiUI.Internal.RectTable (insertRect, lookupRect)
 import ChibiUI.Internal.Store
-import ChibiUI.Internal.Style (Theme (..), TextAlign, alignedTextY, fieldHeight)
+import ChibiUI.Internal.Style (Theme (..), TextAlign, alignedTextY, fieldHeight, widgetPad)
 import ChibiUI.Internal.Types
 
 -- | A view, or one widget's body, with access to an application model.
@@ -136,10 +135,10 @@ newtype ChibiUI model a = ChibiUI (ReaderT (Context model) IO a)
 -- | Model updates are visible immediately and persist across frames. Keeping
 -- the model in the context also lets deferred menu actions use its latest value.
 instance MonadState model (ChibiUI model) where
-  get = askContext >>= liftIO . readModel . ctxModel
+  get = ask >>= liftIO . readModel . ctxModel
   put model = state (const ((), model))
   state f = do
-    ctx <- askContext
+    ctx <- ask
     liftIO (stateModel (ctxModel ctx) f)
 
 -- | Wrap a child view's returned message in its parent's message type.
@@ -181,10 +180,6 @@ edit project replace widget = do
 -- | Run an action against a context, retaining any model updates in it.
 runChibiUI :: Context model -> ChibiUI model a -> IO a
 runChibiUI ctx (ChibiUI m) = runReaderT m ctx
-
--- | The context, for the plumbing that needs more than one helper.
-askContext :: ChibiUI model (Context model)
-askContext = ask
 
 -- | Read one of the context's references.
 {-# INLINE readCtx #-}
@@ -257,6 +252,11 @@ widgetState m wid = lookupState m (slotOf wid) <$> readCtx ctxStore
 setWidgetState :: StoreMap s -> WidgetId -> Maybe s -> ChibiUI model ()
 setWidgetState m wid st = modifyCtx ctxStore (writeState m (slotOf wid) st)
 
+-- | Move a widget's entry from @old@, as read this frame, to @new@,
+-- writing only when they differ.
+updateWidgetState :: Eq s => StoreMap s -> WidgetId -> Maybe s -> Maybe s -> ChibiUI model ()
+updateWidgetState m wid old new = when (new /= old) (setWidgetState m wid new)
+
 -- | Place a widget at the cursor: take the rectangle its size needs,
 -- advance the cursor past it, and return the rectangle. A 'nextWidth' or
 -- 'nextHeight' override replaces the measured size once.
@@ -301,6 +301,10 @@ textSize :: Text -> ChibiUI model Size
 textSize t = do
   w <- measureText t
   pure (Size w lineHeight)
+
+-- | A line of text and a widget's padding around it.
+paddedText :: Text -> ChibiUI model Size
+paddedText t = (\(Size w h) -> Size (w + widgetPad * 2) (h + widgetPad * 2)) <$> textSize t
 
 -- | Keep the next widget on the current line, to the right of the last one
 -- placed. For gluing a pair together, or for putting a widget that a helper
@@ -429,7 +433,7 @@ uiScale = readCtx ctxFont >>= liftIO . fontScale
 -- | Request a device scale; zero restores automatic monitor DPI. Takes
 -- effect in the next native frame. Non-finite values are ignored.
 setUiScale :: Float -> ChibiUI model ()
-setUiScale scale = unless (isNaN scale || isInfinite scale) $ do
+setUiScale scale = when (isFinite scale) $ do
   writeCtx ctxScaleOverride (max 0 scale)
   requestFrame
 
@@ -453,7 +457,7 @@ scrollDelta = inputScroll <$> getInput
 hovered :: Rect -> ChibiUI model Bool
 hovered r = do
   p <- mousePos
-  clip <- asks ctxArena >>= liftIO . currentClip
+  clip <- currentClipRect
   blocked <- readCtx ctxInputBlocked
   pure (not blocked && rectHit r p && rectHit clip p)
 
@@ -507,13 +511,13 @@ wantCursor = writeCtx ctxCursor
 {-# INLINE recordRect #-}
 recordRect :: WidgetId -> Rect -> ChibiUI model ()
 recordRect wid r = do
-  rects <- readCtx ctxRects
+  rects <- asks ctxRects
   liftIO (insertRect rects (slotOf wid) r)
 
 -- | Where a widget landed this frame, if it has been declared yet.
 lookupWidgetRect :: WidgetId -> ChibiUI model (Maybe Rect)
 lookupWidgetRect wid = do
-  rects <- readCtx ctxRects
+  rects <- asks ctxRects
   liftIO (lookupRect rects (slotOf wid))
 
 -- | The rect of the widget or group placed last.
@@ -526,19 +530,18 @@ itemHovered = itemRect >>= hovered
 
 -- | Whether the focused widget lies within the widget or group placed last.
 itemFocused :: ChibiUI model Bool
-itemFocused = itemHolds ctxFocus
+itemFocused = itemRect >>= (`holdsWithin` ctxFocus)
 
 -- | Whether the widget holding the pointer grab lies within the widget or
 -- group placed last: it is being pressed or dragged.
 itemActive :: ChibiUI model Bool
-itemActive = itemHolds ctxActive
+itemActive = itemRect >>= (`holdsWithin` ctxActive)
 
 -- | Whether the widget one of the context's references names lies within
--- the last item.
-itemHolds :: (Context model -> IORef WidgetId) -> ChibiUI model Bool
-itemHolds field = do
+-- a rect.
+holdsWithin :: Rect -> (Context model -> IORef WidgetId) -> ChibiUI model Bool
+holdsWithin r field = do
   wid <- readCtx field
-  r <- itemRect
   if wid == noWidget then pure False else maybe False (rectContains r) <$> lookupWidgetRect wid
 
 -- | The theme, for colours and spacing.
@@ -592,6 +595,10 @@ withClip r body = do
   a <- body
   liftIO (popClip (ctxArena ctx))
   pure a
+
+-- | The clip as it stands, in window coordinates.
+currentClipRect :: ChibiUI model Rect
+currentClipRect = asks ctxArena >>= liftIO . currentClip
 
 -- | A solid rectangle, in window coordinates.
 {-# INLINE fillRectUI #-}
@@ -650,7 +657,7 @@ requestFrame = modifyCtx ctxWake (min WakeSoon)
 -- does; the loop sleeps until then unless input comes first. Non-finite
 -- times are ignored.
 requestFrameAt :: Double -> ChibiUI model ()
-requestFrameAt t = unless (isNaN t || isInfinite t) (modifyCtx ctxWake (min (WakeAt t)))
+requestFrameAt t = when (isFinite t) (modifyCtx ctxWake (min (WakeAt t)))
 
 -- | End the session after this frame.
 quitUi :: ChibiUI model ()
