@@ -39,6 +39,7 @@ main = do
   testTooltip
   testDisabled
   testLabeled
+  testEdit
   testTable
   testRaggedTable
   testPlotLines
@@ -606,6 +607,15 @@ testLabeled = do
     [caption, field] -> assert ("labeled: caption and field misplaced: " ++ show rs)
       (rectX caption < rectX field && rectY caption == rectY field && rectH caption == rectH field)
     _ -> fail ("labeled: expected two rects: " ++ show rs)
+
+-- 'edit' feeds a widget part of the model and keeps what it returns.
+testEdit :: IO ()
+testEdit = do
+  ctx <- newContext (Model 1 "keep")
+  let view = edit modelCount (\v m -> m {modelCount = v}) (\n -> pure (n * 10))
+  shown <- frame ctx id view
+  after <- runChibiUI ctx get
+  assert "edit: value not shown or kept" (shown == 10 && after == Model 10 "keep")
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.
