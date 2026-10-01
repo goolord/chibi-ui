@@ -63,6 +63,7 @@ module ChibiUI
   , button
   , checkbox
   , radio
+  , combo
   , textInput
   , textArea
   , intInput
@@ -178,6 +179,7 @@ import ChibiUI.Internal.Widgets
   ( button
   , checkbox
   , radio
+  , combo
   , floatInput
   , image
   , intInput

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `combo options value`: a field showing the chosen option that
+  opens a menu of the options.
+
 - Added `progressBar fraction`: a bar filled that far across.
 
 - Added `radio options value`: a row of boxes, one per option, that
