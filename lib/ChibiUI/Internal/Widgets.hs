@@ -36,6 +36,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Numeric (showFFloat)
 import Text.Read (readMaybe)
+import ChibiUI.Internal.Context (Context (..), ScrollTarget (..))
 import ChibiUI.Internal.Draw (emitQuadUV, fillRect, texImage)
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
@@ -488,7 +489,7 @@ textField mode measure value transform = do
       pure (Just (settle d) {fieldClick = click, fieldQueued = Nothing}, ed, moved)
   let st = fromMaybe saved next
       active = editing (fieldDraft st)
-  layout@(FieldLayout _ _ _ _ scroll) <- fieldLayout mode r shown active reveal (fieldScroll st)
+  layout@(FieldLayout _ _ _ _ scroll) <- fieldLayout wid mode r shown active reveal (fieldScroll st)
   let scrolled = scroll /= fieldScroll st
       final = if scrolled then st {fieldScroll = scroll} else st
   -- An unchanged state keeps its entry: storing an equal value rebuilds
@@ -616,16 +617,19 @@ data FieldLayout = FieldLayout !Rect [(Int, Text)] !Int !Float !V2
 -- | Lay out a field's text: the wheel scrolls a hovered text area, and
 -- while editing the caret stays in view, on every frame for a single line
 -- and after an edit (@reveal@) for a text area.
-fieldLayout :: FieldMode -> Rect -> Editor -> Bool -> Bool -> V2 -> ChibiUI model FieldLayout
-fieldLayout mode r ed focused reveal old = do
+fieldLayout :: WidgetId -> FieldMode -> Rect -> Editor -> Bool -> Bool -> V2 -> ChibiUI model FieldLayout
+fieldLayout wid mode r ed focused reveal old = do
   let EditState t caret _ = editState ed
       multiline = mode == MultiLine
       inner = fieldInner mode r
       ls = if multiline then textLines t else [(0, t)]
       (caretRow, (lineStart, line)) = caretRowLine ls caret
+      textH = fromIntegral (length ls) * lineHeight
   -- An unfocused single line never scrolls, so it needs no caret pen.
   caretPen <- if focused then measureText (T.take (caret - lineStart) line) else pure 0
-  V2 wheelX wheelY <- if multiline then wheelScroll r old else pure old
+  -- The widest line is measured only to clamp a scroll right of the start,
+  -- so the wheel takes any rightward step.
+  V2 wheelX wheelY <- if multiline then wheelScroll wid old else pure old
   let keepVisible pos size extent offset
         | pos < offset = pos
         | pos + size > offset + extent = pos + size - extent
@@ -640,10 +644,13 @@ fieldLayout mode r ed focused reveal old = do
     pure (clampSpan (maximum (0 : widths) + 1) (rectW inner) wantX)
   let y
         | not multiline = 0
-        | otherwise = clampSpan (fromIntegral (length ls) * lineHeight) (rectH inner) $
+        | otherwise = clampSpan textH (rectH inner) $
             if focused && reveal
               then keepVisible (fromIntegral caretRow * lineHeight) lineHeight (rectH inner) wheelY
               else wheelY
+  -- The widest line is measured only to clamp a scroll right of the start,
+  -- so the wheel takes any rightward step.
+  when multiline (scrollTarget wid r (V2 x y) (V2 (1 / 0) (max 0 (textH - rectH inner))))
   pure (FieldLayout inner ls caretRow caretPen (V2 x y))
 
 -- | Draw the field box, its text at the layout's scroll, and the blinking
@@ -808,19 +815,37 @@ table headers rows = do
 
 -- | Clip and scroll a body: the region fills the rest of its scope's width
 -- and height (the window's, less padding, at top level); 'nextWidth' and
--- 'nextHeight' size it instead. The wheel scrolls every region under the
--- pointer, and a thin scrollbar appears when the body is taller than the
--- region. Drag the scrollbar's thumb to scroll, or press the track to bring
--- the thumb under the pointer and drag from there.
+-- 'nextHeight' size it instead. A thin scrollbar appears when the body is
+-- taller than the region. Drag the scrollbar's thumb to scroll, or press
+-- the track to bring the thumb under the pointer and drag from there.
+--
+-- The wheel scrolls the innermost region under the pointer, and the one
+-- around it once that region reaches its end. A full-width region at top
+-- level reaches out over the window padding on each side it touches, so
+-- its scrollbar sits at the window's edge and its body scrolls under the
+-- edge; the padding moves inside it, around the body.
 scrollColumn :: ChibiUI model a -> ChibiUI model a
 scrollColumn body = do
-  (wid, r) <- widgetRect ((\ls -> Size (Layout.remainingWidth ls) (Layout.remainingHeight ls)) <$> readLayout)
+  (wid, placed) <- widgetRect ((\ls -> Size (Layout.remainingWidth ls) (Layout.remainingHeight ls)) <$> readLayout)
   th <- theme
-  let barW = 4
+  clip <- currentClipRect
+  Size winW winH <- windowSize
+  let pad = themeWindowPad th
+      Rect x0 y0 w0 h0 = placed
+      -- Unclipped and spanning the padded width: the region is the view's.
+      touches a b = abs (a - b) < 0.5
+      wide = clip == Rect 0 0 winW winH && touches x0 pad && touches (x0 + w0) (winW - pad)
+      inset at = if wide && at then pad else 0
+      padX = inset True
+      padT = inset (touches y0 pad)
+      padB = inset (touches (y0 + h0) (winH - pad))
+      r = Rect (x0 - padX) (y0 - padT) (w0 + padX * 2) (h0 + padT + padB)
+      barW = 4
       trackR = Rect (rectX r + rectW r - barW) (rectY r) barW (rectH r)
-  -- The extent is last frame's: the body has not run yet.
+  when wide (recordRect wid r)
+  -- The extent is last frame's, padding included: the body has not run yet.
   saved@(ScrollState scroll0 extent grab0) <- fromMaybe (ScrollState 0 0 0) <$> widgetState scrollRegions wid
-  wheeled <- clampSpan extent (rectH r) . v2Y <$> wheelScroll r (V2 0 scroll0)
+  wheeled <- clampSpan extent (rectH r) . v2Y <$> wheelScroll wid (V2 0 scroll0)
   -- The scrollbar takes the pointer where it showed last frame.
   barHov <- if extent > rectH r then hovered trackR else pure False
   inp <- getInput
@@ -840,15 +865,18 @@ scrollColumn body = do
             clampSpan extent (rectH r) ((py - grab - rectY r) / travel * (extent - rectH r))
         | otherwise = wheeled
   let viewport = r {rectW = max 0 (rectW r - barW)}
-      content = viewport {rectY = rectY r - offset}
+      content = Rect (rectX r + padX) (rectY r + padT - offset)
+        (max 0 (rectW r - padX - max barW padX)) (max 0 (rectH r - padT - padB))
   -- Clip to the region and shift the body up by the scroll.
-  (a, Size _ contentH) <- layoutScope (const (Layout.beginViewport content))
+  (a, Size _ bodyH) <- layoutScope (const (Layout.beginViewport content))
     (\parent inner -> (Layout.contentSize (V2 (rectX content) (rectY content)) inner, parent))
     (withClip viewport body)
-  let maxScroll = max 0 (contentH - rectH r)
+  let contentH = padT + bodyH + padB
+      maxScroll = max 0 (contentH - rectH r)
       scroll1 = clampSpan contentH (rectH r) offset
       next = ScrollState scroll1 contentH grab
   updateWidgetState scrollRegions wid (Just saved) (Just next)
+  scrollTarget wid r (V2 0 scroll1) (V2 0 maxScroll)
   -- A shrunk body moved the clamp: settle the new offset on screen.
   when (scroll1 /= offset) requestFrame
   -- A scrollbar when the body overflows, brighter while hovered or dragged.
@@ -869,14 +897,22 @@ scrollThumb r content offset =
       thumbY = rectY r + (view - thumbH) * (if maxScroll > 0 then offset / maxScroll else 0)
    in (thumbY, thumbH)
 
--- | An offset moved by this frame's wheel, while the pointer is over the
--- region.
-wheelScroll :: Rect -> V2 -> ChibiUI model V2
-wheelScroll r offset@(V2 x y) = do
-  hov <- hovered r
+-- | A region's offset, moved by this frame's wheel when the region owns
+-- it: see 'scrollTarget'.
+wheelScroll :: WidgetId -> V2 -> ChibiUI model V2
+wheelScroll wid offset@(V2 x y) = do
+  owner <- readCtx ctxWheelOwner
   V2 dx dy <- scrollDelta
   -- One wheel step scrolls three lines.
-  pure (if hov then V2 (x + dx * (lineHeight * 3)) (y + dy * (lineHeight * 3)) else offset)
+  pure (if owner == wid then V2 (x + dx * (lineHeight * 3)) (y + dy * (lineHeight * 3)) else offset)
+
+-- | Declare a scroll region at @r@ as the frame leaves it: scrolled to
+-- @offset@, and able to reach @furthest@. The next frame's wheel goes to
+-- the innermost region under the pointer that can still move its way.
+scrollTarget :: WidgetId -> Rect -> V2 -> V2 -> ChibiUI model ()
+scrollTarget wid r offset furthest = do
+  clip <- currentClipRect
+  forM_ (rectIntersect clip r) $ \shown -> modifyCtx ctxScrollTargets (ScrollTarget wid shown offset furthest :)
 
 -- | A body under a dimmed title, inside a 1px border with a gap of padding
 -- all round. It fills the line's width, or takes 'nextWidth'.

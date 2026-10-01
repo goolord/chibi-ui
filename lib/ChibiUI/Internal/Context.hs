@@ -9,6 +9,7 @@ module ChibiUI.Internal.Context
   , ModelAccess (..)
   , ImageEntry (..)
   , Popup (..)
+  , ScrollTarget (..)
   , Wake (..)
   , newContext
   , noWidget
@@ -34,6 +35,11 @@ import ChibiUI.Internal.RectTable (RectTable, newRectTable, rectTableToList)
 import ChibiUI.Internal.Store (WidgetStore, emptyWidgetStore)
 import ChibiUI.Internal.Style (Theme, defaultTheme)
 import ChibiUI.Internal.Types (Rect, V2)
+
+-- | A region the wheel can scroll, as a frame left it: its id, the part
+-- of it showing through the clip, its scroll offset, and the furthest
+-- offset it can reach.
+data ScrollTarget = ScrollTarget !WidgetId !Rect !V2 !V2
 
 -- | One lightweight overlay. Actions run before the next view invocation.
 data Popup = Popup
@@ -88,6 +94,11 @@ data Context model = Context
   -- Settled after each frame's focus resolves.
   , ctxActive :: !(IORef WidgetId)
   -- ^ The widget that grabbed the pointer and has not released it.
+  , ctxScrollTargets :: !(IORef [ScrollTarget])
+  -- ^ This frame's scroll regions. The next frame picks its wheel owner
+  -- from them.
+  , ctxWheelOwner :: !(IORef WidgetId)
+  -- ^ The region this frame's wheel scrolls.
   , ctxCursor :: !(IORef UiCursorKind)
   -- ^ The pointer shape the frame wants; widgets raise it when hovered or
   -- focused.
@@ -155,6 +166,8 @@ newContext initial = do
   ctxFocusables <- newIORef []
   ctxTyping <- newIORef False
   ctxActive <- newIORef noWidget
+  ctxScrollTargets <- newIORef []
+  ctxWheelOwner <- newIORef noWidget
   ctxCursor <- newIORef UiCursorDefault
   ctxTime <- newIORef 0
   ctxQuit <- newIORef False
