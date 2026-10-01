@@ -22,6 +22,7 @@ module ChibiUI.Internal.Widgets
   , table
   , scrollColumn
   , separator
+  , panel
   ) where
 
 import Control.Monad (foldM, forM, forM_, mfilter, msum, when, void)
@@ -826,6 +827,23 @@ wheelScroll r offset@(V2 x y) = do
 -- @view@ extent.
 clampScroll :: Float -> Float -> Float -> Float
 clampScroll content view = clamp 0 (max 0 (content - view))
+
+-- | A body under a dimmed title, inside a 1px border with a gap of padding
+-- all round. It fills the line's width, or takes 'nextWidth'.
+panel :: Text -> ChibiUI model a -> ChibiUI model a
+panel title body = do
+  pad <- themeGap <$> theme
+  a <- column $ do
+    -- Zero-height struts above and below give the padding, the top one
+    -- the full width.
+    w <- availWidth
+    _ <- place (Size w 0)
+    a <- indent pad (nextWidth (max 0 (w - pad * 2)) >> column (labelDim title >> body))
+    a <$ place (Size 0 0)
+  r <- itemRect
+  th <- theme
+  strokeRectUI r 1 (themeBorder th)
+  pure a
 
 -- | A 1px horizontal rule across the line's width.
 separator :: ChibiUI model ()

@@ -41,6 +41,7 @@ main = do
   testLabeled
   testEdit
   testFillWidth
+  testPanel
   testTable
   testRaggedTable
   testPlotLines
@@ -629,6 +630,23 @@ testFillWidth = do
   let field = last rs
   assert ("fillWidth: field does not reach the edge: " ++ show rs)
     (rectX field + rectW field == 800 - pad)
+
+-- A panel spans the line and keeps its title and body a gap inside its
+-- border on every side.
+testPanel :: IO ()
+testPanel = do
+  ctx <- newTestContext
+  outer <- frame ctx id (panel "box" (button "x") >> itemRect)
+  rs <- readRects ctx
+  th <- runChibiUI ctx theme
+  let gap = themeGap th
+      left = minimum (map rectX rs)
+      top = minimum (map rectY rs)
+      bottom = maximum (map (\r -> rectY r + rectH r) rs)
+  assert ("panel: padding or width wrong: " ++ show (outer, rs))
+    (rectW outer == 800 - themeWindowPad th * 2
+      && left - rectX outer == gap && top - rectY outer == gap
+      && rectY outer + rectH outer - bottom == gap)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.
