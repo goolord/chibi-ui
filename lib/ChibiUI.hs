@@ -79,6 +79,7 @@ module ChibiUI
   , table
   , treeNode
   , separator
+  , separatorText
   , panel
   , contextMenu
   , tooltip
@@ -210,6 +211,7 @@ import ChibiUI.Internal.Widgets
   , selectableText
   , scrollColumn
   , separator
+  , separatorText
   , panel
   , slider
   , table

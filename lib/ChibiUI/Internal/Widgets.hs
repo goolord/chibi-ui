@@ -22,6 +22,7 @@ module ChibiUI.Internal.Widgets
   , table
   , scrollColumn
   , separator
+  , separatorText
   , panel
   ) where
 
@@ -844,6 +845,17 @@ panel title body = do
   th <- theme
   strokeRectUI r 1 (themeBorder th)
   pure a
+
+-- | A dimmed caption, then a 1px rule across the rest of the line, to head
+-- a section.
+separatorText :: Text -> ChibiUI model ()
+separatorText t = do
+  (_, r) <- widgetRect ((\w -> Size w lineHeight) <$> availWidth)
+  th <- theme
+  tw <- measureText t
+  drawTextIn r t (themeTextDim th)
+  let x = rectX r + tw + widgetPad
+  fillRectUI (Rect x (rectY r + rectH r / 2) (max 0 (rectX r + rectW r - x)) 1) (themeBorder th)
 
 -- | A 1px horizontal rule across the line's width.
 separator :: ChibiUI model ()

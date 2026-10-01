@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `separatorText caption`: a dimmed caption with a rule across the
+  rest of the line, to head a section.
+
 - Added `panel title body`: a body under a dimmed title, inside a border
   padded by a gap all round.
 
