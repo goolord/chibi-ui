@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `dragFloat value speed`: a number to drag, changing by `speed` per
+  pixel the pointer moves right or left of where it pressed.
+
 - Added `textInputHint hint value`: a `textInput` that shows a dimmed hint
   while it is empty and not focused.
 

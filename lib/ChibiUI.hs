@@ -73,6 +73,7 @@ module ChibiUI
   , intInput
   , floatInput
   , slider
+  , dragFloat
   , progressBar
   , image
   , useImageRgba
@@ -215,6 +216,7 @@ import ChibiUI.Internal.Widgets
   , separatorText
   , panel
   , slider
+  , dragFloat
   , table
   , treeNode
   , textInput
