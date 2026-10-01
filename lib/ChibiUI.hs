@@ -78,6 +78,7 @@ module ChibiUI
   , treeNode
   , separator
   , contextMenu
+  , tooltip
 
     -- * Layout
 
@@ -182,7 +183,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input (Key (..), Modifiers (..), MouseButton (..), noModifiers)
-import ChibiUI.Internal.Menu (contextMenu)
+import ChibiUI.Internal.Menu (contextMenu, tooltip)
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Style (Theme (..), TextAlign (..), defaultTheme, lightTheme)
 import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))

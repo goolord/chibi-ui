@@ -65,6 +65,8 @@ data Context model = Context
   , ctxScaleOverride :: !(IORef Float)
   -- ^ Zero follows the monitor; positive values override device scale.
   , ctxPopup :: !(IORef (Maybe Popup))
+  , ctxTooltip :: !(IORef (Maybe (V2, Text)))
+  -- ^ The tooltip to paint over this frame, and the pointer it follows.
   , ctxInputBlocked :: !(IORef Bool)
   , ctxTheme :: !(IORef Theme)
   , ctxInput :: !(IORef Input)
@@ -139,6 +141,7 @@ newContext initial = do
   ctxFont <- newIORef =<< newFont embeddedFont
   ctxScaleOverride <- newIORef 0
   ctxPopup <- newIORef Nothing
+  ctxTooltip <- newIORef Nothing
   ctxInputBlocked <- newIORef False
   ctxTheme <- newIORef defaultTheme
   ctxInput <- newIORef emptyInput

@@ -46,6 +46,7 @@ demo = do
     medium <- button "1.5x"
     two <- button "2x"
     auto <- button "Auto DPI"
+    tooltip "Follow the monitor's scale"
     when one (setUiScale 1)
     when medium (setUiScale 1.5)
     when two (setUiScale 2)

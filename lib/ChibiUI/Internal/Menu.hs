@@ -1,6 +1,9 @@
--- | One flat, window-clamped context menu, painted after the normal view.
+-- | The overlays painted after the normal view: one flat, window-clamped
+-- context menu, and tooltips.
 module ChibiUI.Internal.Menu
-  ( contextMenu, openContextMenu, openPopup, processPopup, paintPopup ) where
+  ( contextMenu, openContextMenu, openPopup, processPopup, paintPopup
+  , tooltip, paintTooltip
+  ) where
 
 import Control.Monad (forM_, when)
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
@@ -9,10 +12,45 @@ import ChibiUI.Internal.Context (Context (..), Popup (..), noWidget)
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input
-import ChibiUI.Internal.Layout (lsLast)
+import ChibiUI.Internal.Store (tooltipHovers)
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Style
 import ChibiUI.Internal.Types
+
+-- | Attach a tooltip to the preceding widget or group: once the pointer has
+-- been over it for half a second, @t@ shows in a box beside the pointer,
+-- above every widget.
+tooltip :: Text -> ChibiUI model ()
+tooltip t = do
+  wid <- nextId
+  hov <- itemHovered
+  since <- widgetState tooltipHovers wid
+  now <- uiTime
+  let delay = 0.5
+  case (hov, since) of
+    (False, Just _) -> setWidgetState tooltipHovers wid Nothing
+    (True, Nothing) -> setWidgetState tooltipHovers wid (Just now) >> requestFrameAt (now + delay)
+    (True, Just start)
+      | now >= start + delay -> mousePos >>= \p -> writeCtx ctxTooltip (Just (p, t))
+      | otherwise -> requestFrameAt (start + delay)
+    _ -> pure ()
+
+-- | Paint this frame's tooltip, below and right of the pointer, kept
+-- inside the window.
+paintTooltip :: ChibiUI model ()
+paintTooltip = do
+  current <- readCtx ctxTooltip
+  forM_ current $ \(V2 px py, t) -> do
+    Size w h <- windowSize
+    tw <- measureText t
+    let bw = tw + widgetPad * 2
+        bh = lineHeight + widgetPad * 2
+        r = Rect (clamp 0 (max 0 (w - bw)) (px + 12)) (clamp 0 (max 0 (h - bh)) (py + 18)) bw bh
+    th <- theme
+    withClip r $ do
+      fillRectUI r (themeSurface th)
+      strokeRectUI r 1 (themeBorder th)
+      textInRect r t (themeText th)
 
 -- | Attach a right-click menu to the preceding widget or group. Actions
 -- should update application state, rather than declare more widgets.
@@ -21,7 +59,7 @@ import ChibiUI.Internal.Types
 contextMenu :: [(Text, ChibiUI model ())] -> ChibiUI model ()
 contextMenu items = do
   wid <- nextId
-  r <- lsLast <$> readLayout
+  r <- itemRect
   recordRect wid r
   openContextMenu wid r [(t, True, action) | (t, action) <- items]
 

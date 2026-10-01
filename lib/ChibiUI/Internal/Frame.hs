@@ -14,7 +14,7 @@ import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Id (WidgetId, initialIdPath)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad
-import ChibiUI.Internal.Menu (processPopup, paintPopup)
+import ChibiUI.Internal.Menu (processPopup, paintPopup, paintTooltip)
 import ChibiUI.Internal.Layout (beginViewport)
 import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
@@ -38,6 +38,7 @@ runFrame ctx inp view = do
   writeIORef (ctxIdSib ctx) 0
   writeIORef (ctxInput ctx) inp
   writeIORef (ctxInputBlocked ctx) False
+  writeIORef (ctxTooltip ctx) Nothing
   t <- getMonotonicTime
   writeIORef (ctxTime ctx) t
   -- Start the cursor at the window's content origin.
@@ -64,7 +65,7 @@ runFrame ctx inp view = do
   -- Focus resolves after painting. Settle the old/new field visuals and
   -- drafts even when the user produces no further native event.
   when (focusAfter /= focusBefore) (modifyIORef' (ctxWake ctx) (min WakeSoon))
-  runChibiUI ctx (paintPopup inp)
+  runChibiUI ctx (paintTooltip >> paintPopup inp)
   dd <- finishFrame (ctxArena ctx)
   pure (a, dd)
 
