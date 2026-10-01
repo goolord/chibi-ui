@@ -68,7 +68,7 @@ demo = do
   -- and keeps what the widget returns.
   _ <- labeled "name" $ do
     fillWidth
-    edit name (\v m -> m {name = v}) textInput
+    edit name (\v m -> m {name = v}) (textInputHint "your name")
   _ <- labeled "temp" (edit temperature (\v m -> m {temperature = v}) floatInput)
   labelDim "Drag to select; double-click a word; right-click to edit."
   labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo"

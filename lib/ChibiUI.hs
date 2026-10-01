@@ -68,6 +68,7 @@ module ChibiUI
   , combo
   , tabs
   , textInput
+  , textInputHint
   , textArea
   , intInput
   , floatInput
@@ -217,5 +218,6 @@ import ChibiUI.Internal.Widgets
   , table
   , treeNode
   , textInput
+  , textInputHint
   , textArea
   )

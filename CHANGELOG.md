@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added `textInputHint hint value`: a `textInput` that shows a dimmed hint
+  while it is empty and not focused.
+
 - `slider` shows its value to two places at its right end; the track
   shortens to make room for the wider of the range's ends.
 

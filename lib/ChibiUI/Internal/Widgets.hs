@@ -12,6 +12,7 @@ module ChibiUI.Internal.Widgets
   , tabs
   , treeNode
   , textInput
+  , textInputHint
   , textArea
   , intInput
   , floatInput
@@ -276,6 +277,18 @@ treeNode title body = column $ do
 -- clipboard, word-motion and undo shortcuts share the right-click menu.
 textInput :: Text -> ChibiUI model Text
 textInput value = textField SingleLine (fieldSize 180) value (const id)
+
+-- | A 'textInput' that shows a dimmed @hint@ while it is empty and not
+-- focused.
+textInputHint :: Text -> Text -> ChibiUI model Text
+textInputHint hint value = do
+  v <- textInput value
+  r <- itemRect
+  focused <- itemFocused
+  when (T.null v && not focused) $ do
+    th <- theme
+    drawTextIn (rectInflate (-fieldPad) r) hint (themeTextDim th)
+  pure v
 
 -- | A multiline field, five lines tall by default. Enter inserts a newline;
 -- Tab moves focus and Escape restores the focus-time value. Lines do not wrap;
