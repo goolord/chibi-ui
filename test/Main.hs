@@ -45,6 +45,7 @@ main = do
   testTextInputHint
   testDragFloat
   testLabelWrapped
+  testDebugOverlay
   testTable
   testRaggedTable
   testPlotLines
@@ -711,6 +712,20 @@ testLabelWrapped = do
   broken <- bigRect =<< readRects ctx
   assert ("labelWrapped: wrong line counts: " ++ show (wrapped, broken))
     (rectW wrapped == widest * 2 && rectH wrapped >= 16 * 3 && rectH broken == 16 * 2)
+
+-- The debug overlay draws outlines, the hovered widget's label and the
+-- counts on top of the view, and places no widget of its own.
+testDebugOverlay :: IO ()
+testDebugOverlay = do
+  ctx <- newTestContext
+  let quads view = do
+        (_, dd) <- runFrame ctx (at 12 12 emptyInput) view
+        n <- length <$> readRects ctx
+        pure (sum (map cmdQuadCount (drawCommands dd)), n)
+  (plain, plainRects) <- quads (button "a" >> button "b" >> pure ())
+  (debug, debugRects) <- quads (button "a" >> button "b" >> debugOverlay)
+  assert ("debugOverlay: drew nothing or placed widgets: " ++ show (plain, debug))
+    (debug > plain + 8 && debugRects == plainRects)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.

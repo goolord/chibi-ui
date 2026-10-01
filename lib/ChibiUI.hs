@@ -161,6 +161,7 @@ module ChibiUI
   , drawTextIn
   , drawTextAt
   , textInRect
+  , debugOverlay
 
     -- * Clipboard and frame control
   , getClipboard
@@ -193,7 +194,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input (Key (..), Modifiers (..), MouseButton (..), noModifiers)
-import ChibiUI.Internal.Menu (contextMenu, tooltip)
+import ChibiUI.Internal.Menu (contextMenu, debugOverlay, tooltip)
 import ChibiUI.Internal.Monad
 import ChibiUI.Internal.Style (Theme (..), TextAlign (..), defaultTheme, lightTheme)
 import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))

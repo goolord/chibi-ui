@@ -25,6 +25,7 @@ data Model = Model
   , salutation :: !Text
   , tab :: !Int
   , locked :: !Bool
+  , debug :: !Bool
   }
 
 data Wave = Sine | Saw
@@ -32,7 +33,7 @@ data Wave = Sine | Saw
 
 -- | The model the demo starts with.
 demoModel :: Model
-demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine "hello" 0 False
+demoModel = Model "world" 0 20.5 0.4 "Write notes here.\nEnter adds a new line." True Sine "hello" 0 False False
 
 demo :: ChibiUI Model ()
 demo = do
@@ -74,7 +75,7 @@ demo = do
     _ <- edit temperature (\v m -> m {temperature = v}) floatInput
     edit temperature (\v m -> m {temperature = v}) (`dragFloat` 0.1)
   labelDim "Drag to select; double-click a word; right-click to edit."
-  labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo"
+  labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo | F12: debug"
 
   -- Slider and line plot.
   labeled "frequency" $ do
@@ -134,6 +135,12 @@ demo = do
   labelDim "scrolled rows:"
   scrollColumn $ do
     mapM_ (\i -> label ("row " <> T.pack (show (i :: Int)))) [1 .. 40]
+
+  -- F12 toggles an overlay of every widget's rect, drawn over the view.
+  f12 <- keyPressed (KeyF 12)
+  when f12 (modify (\m -> m {debug = not (debug m)}))
+  showDebug <- gets debug
+  when showDebug debugOverlay
 
 -- | A blue-to-white gradient, four bytes per pixel, top row first.
 gradientPixels :: Int -> Int -> BS.ByteString
