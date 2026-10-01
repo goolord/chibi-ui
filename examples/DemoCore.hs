@@ -69,7 +69,9 @@ demo = do
   _ <- labeled "name" $ do
     fillWidth
     edit name (\v m -> m {name = v}) (textInputHint "your name")
-  _ <- labeled "temp" (edit temperature (\v m -> m {temperature = v}) floatInput)
+  _ <- labeled "temp" $ do
+    _ <- edit temperature (\v m -> m {temperature = v}) floatInput
+    edit temperature (\v m -> m {temperature = v}) (`dragFloat` 0.1)
   labelDim "Drag to select; double-click a word; right-click to edit."
   labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo"
 

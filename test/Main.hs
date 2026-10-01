@@ -43,6 +43,7 @@ main = do
   testFillWidth
   testPanel
   testTextInputHint
+  testDragFloat
   testTable
   testRaggedTable
   testPlotLines
@@ -673,6 +674,28 @@ testTextInputHint = do
   focusedEmpty <- quads (keys [KeyBackspace])
   assert ("hint: drawn wrong: " ++ show (withHint, plainQuads, typed, focusedEmpty))
     (withHint > plainQuads && typed == "x" && focusedEmpty < withHint)
+
+-- Dragging a number changes it by its speed per pixel moved since the
+-- press, even past its box; arrows step it while focused.
+testDragFloat :: IO ()
+testDragFloat = do
+  ctx <- newTestContext
+  ref <- newIORef (1 :: Float)
+  let view = do
+        v <- (`dragFloat` 0.5) =<< liftIO (readIORef ref)
+        liftIO (writeIORef ref v)
+        pure v
+  _ <- frame ctx id view
+  r <- bigRect =<< readRects ctx
+  let y = rectY r + 2
+      x0 = rectX r + 4
+  pressed <- frame ctx (at x0 y . pressLeft) view
+  dragged <- frame ctx (at (x0 + 10) y) view
+  far <- frame ctx (at (x0 + 400) y) view
+  released <- frame ctx (at (x0 + 400) y . releaseLeft) view
+  stepped <- frame ctx (keys [KeyLeft]) view
+  assert ("dragFloat: wrong values: " ++ show (pressed, dragged, far, released, stepped))
+    (pressed == 1 && dragged == 6 && far == 201 && released == 201 && stepped == 200.5)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.

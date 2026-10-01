@@ -17,6 +17,7 @@ module ChibiUI.Internal.Widgets
   , intInput
   , floatInput
   , slider
+  , dragFloat
   , progressBar
   , image
   , plotLines
@@ -365,6 +366,29 @@ slider value lo hi = do
 -- | A number to two decimal places.
 twoPlaces :: Float -> Text
 twoPlaces x = T.pack (showFFloat (Just 2) x "")
+
+-- | A number to drag: press it and move the pointer right or left to
+-- change @value@ by @speed@ per pixel; Left/Right step a focused one by
+-- @speed@. Returns the value it now holds.
+dragFloat :: Float -> Float -> ChibiUI model Float
+dragFloat value speed = do
+  (wid, r, i) <- interactive clickable (fieldSize 120)
+  saved <- widgetState dragGrabs wid
+  let inp = iInput i
+      x = v2X (inputMousePos inp)
+      grab | iActive i && pressedIn MouseLeft inp = Just (x, value)
+           | iActive i = saved
+           | otherwise = Nothing
+      moved
+        | Just (x0, v0) <- grab, heldIn MouseLeft inp = v0 + (x - x0) * speed
+        | Just d <- focusedKey i [(KeyLeft, -speed), (KeyRight, speed)] = value + d
+        | otherwise = value
+  when (grab /= saved) (setWidgetState dragGrabs wid grab)
+  th <- theme
+  fillRectUI r (surfaceFor th i)
+  frameBorder th r (iFocused i)
+  textInRect r (twoPlaces moved) (themeText th)
+  pure moved
 
 -- | A bar filled @fraction@ of the way across, for 0 to 1: at most 160
 -- wide, like 'slider'.
