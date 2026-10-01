@@ -90,7 +90,8 @@ module ChibiUI
     -- on their own. 'sameLine' is the one-shot escape hatch for a pair, or
     -- for putting a helper-placed widget on the current line; 'newline'
     -- steps down explicitly; 'indent' shifts a body's lines; 'nextWidth'
-    -- and 'nextHeight' size the next widget; 'space' steps the cursor;
+    -- and 'nextHeight' size the next widget, and 'fillWidth' stretches it
+    -- to the line's end; 'space' steps the cursor;
     -- 'scrollColumn' clips and scrolls its body to the window's bottom.
   , sameLine
   , newline
@@ -98,6 +99,7 @@ module ChibiUI
   , column
   , indent
   , nextWidth
+  , fillWidth
   , nextHeight
   , space
   , scrollColumn

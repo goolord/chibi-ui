@@ -43,6 +43,7 @@ module ChibiUI.Internal.Monad
   , column
   , indent
   , nextWidth
+  , fillWidth
   , nextHeight
   , space
   -- * Input reads
@@ -354,6 +355,11 @@ layoutScope enter leave body = do
 -- | Give the next widget a width, instead of its measured one.
 nextWidth :: Float -> ChibiUI model ()
 nextWidth = layoutCommand . Layout.NextWidth
+
+-- | Give the next widget the rest of the line's width, as a field beside
+-- its caption fills out to the right edge.
+fillWidth :: ChibiUI model ()
+fillWidth = availWidth >>= nextWidth
 
 -- | Give the next widget a height, instead of its measured one.
 nextHeight :: Float -> ChibiUI model ()

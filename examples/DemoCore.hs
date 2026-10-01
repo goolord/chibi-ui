@@ -52,7 +52,7 @@ demo = do
     when auto (setUiScale 0)
 
   -- Buttons and state. Inside a row, children flow left to right.
-  row $ do
+  _ <- row $ do
     isLocked <- gets locked
     disabled isLocked $ do
       minus <- button "-"
@@ -66,10 +66,10 @@ demo = do
 
   -- Text and number fields. 'edit' shows part of the model in a widget
   -- and keeps what the widget returns.
-  labeled "name" $ do
-    nextWidth 180
+  _ <- labeled "name" $ do
+    fillWidth
     edit name (\v m -> m {name = v}) textInput
-  labeled "temp" (edit temperature (\v m -> m {temperature = v}) floatInput)
+  _ <- labeled "temp" (edit temperature (\v m -> m {temperature = v}) floatInput)
   labelDim "Drag to select; double-click a word; right-click to edit."
   labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo"
 

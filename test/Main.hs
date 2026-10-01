@@ -40,6 +40,7 @@ main = do
   testDisabled
   testLabeled
   testEdit
+  testFillWidth
   testTable
   testRaggedTable
   testPlotLines
@@ -616,6 +617,18 @@ testEdit = do
   shown <- frame ctx id view
   after <- runChibiUI ctx get
   assert "edit: value not shown or kept" (shown == 10 && after == Model 10 "keep")
+
+-- 'fillWidth' stretches the next widget to the right edge of its scope,
+-- here the window less its padding.
+testFillWidth :: IO ()
+testFillWidth = do
+  ctx <- newTestContext
+  _ <- frame ctx id (labeled "caption" (fillWidth >> textInput "value"))
+  rs <- readRects ctx
+  pad <- themeWindowPad <$> runChibiUI ctx theme
+  let field = last rs
+  assert ("fillWidth: field does not reach the edge: " ++ show rs)
+    (rectX field + rectW field == 800 - pad)
 
 -- | Press and release the left button just inside a rect: the release
 -- frame's result.
