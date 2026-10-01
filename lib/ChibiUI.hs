@@ -79,6 +79,7 @@ module ChibiUI
   , separator
   , contextMenu
   , tooltip
+  , disabled
 
     -- * Layout
 

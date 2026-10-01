@@ -79,6 +79,8 @@ module ChibiUI.Internal.Monad
   -- * Drawing
   , theme
   , withTheme
+  , disabled
+  , isDisabled
   , withTextAlign
   , alignTextToFrame
   , drawIO
@@ -529,6 +531,19 @@ theme = readCtx ctxTheme
 -- | Draw a body with another theme.
 withTheme :: Theme -> ChibiUI model a -> ChibiUI model a
 withTheme t = locally ctxTheme (const t)
+
+-- | Run a body with its widgets disabled when the flag is 'True': they
+-- draw dimmed, and ignore the pointer and keyboard, so a disabled button
+-- never clicks and Tab skips its widgets. Scroll regions still scroll.
+disabled :: Bool -> ChibiUI model a -> ChibiUI model a
+disabled False body = body
+disabled True body = locally ctxDisabled (const True) (locally ctxTheme dim body)
+  where
+    dim th = th {themeText = themeTextDim th, themeAccent = themeBorder th}
+
+-- | Whether widgets declared here are 'disabled'.
+isDisabled :: ChibiUI model Bool
+isDisabled = readCtx ctxDisabled
 
 -- | Draw a body with text aligned vertically another way.
 withTextAlign :: TextAlign -> ChibiUI model a -> ChibiUI model a

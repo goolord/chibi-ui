@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added `disabled flag body`: while the flag holds, the body's widgets draw
+  dimmed and ignore the pointer and keyboard; Tab skips them and their
+  context menus stay shut.
+
 - Added `tooltip text`: once the pointer has rested on the preceding
   widget or group for half a second, the text shows beside the pointer,
   over every widget. It waits with `requestFrameAt`, not by polling.

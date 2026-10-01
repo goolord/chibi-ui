@@ -204,6 +204,11 @@ editable = InteractionSpec True UiCursorText True
 -- Enter/Space while focused.
 interaction :: InteractionSpec -> WidgetId -> Rect -> ChibiUI model Interaction
 interaction p wid r = do
+  off <- isDisabled
+  if off then Interaction False False False False <$> getInput else interaction' p wid r
+
+interaction' :: InteractionSpec -> WidgetId -> Rect -> ChibiUI model Interaction
+interaction' p wid r = do
   addFocusable wid r (pressTyping p)
   hov <- hovered r
   inp <- getInput
