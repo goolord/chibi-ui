@@ -31,6 +31,27 @@ counter = do
   when down (modify (\m -> m { count = count m - 1 }))
 ```
 
+Record fields are lenses with `ChibiUI.Labels` and a `Generic` model, so
+`edit` and `mapModel` take them by label, and microlens-mtl's operators
+update them:
+
+```haskell
+{-# LANGUAGE OverloadedLabels #-}
+
+import GHC.Generics (Generic)
+import ChibiUI.Labels ()
+import Lens.Micro.Mtl (use, (%=))
+
+data Model = Model { name :: Text, count :: Int } deriving Generic
+
+view :: ChibiUI Model ()
+view = do
+  _ <- edit #name textInput
+  up <- button "+"
+  when up (#count %= (+ 1))
+  label . T.pack . show =<< use #count
+```
+
 ## Build
 
 ```sh

@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The demo view and model, without the window entry point, so the memory
@@ -12,7 +13,10 @@ module DemoCore
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
 import Data.Word (Word8)
+import GHC.Generics (Generic)
+import Lens.Micro.Mtl (use, (%=), (.=))
 import ChibiUI
+import ChibiUI.Labels ()
 
 data Model = Model
   { name :: !Text
@@ -27,6 +31,7 @@ data Model = Model
   , locked :: !Bool
   , debug :: !Bool
   }
+  deriving (Generic)
 
 data Wave = Sine | Saw
   deriving (Eq)
@@ -42,8 +47,8 @@ demo = do
 
   -- F12 toggles an overlay of every widget's rect, drawn over the view.
   f12 <- keyPressed (KeyF 12)
-  when f12 (modify (\m -> m {debug = not (debug m)}))
-  showDebug <- gets debug
+  when f12 (#debug %= not)
+  showDebug <- use #debug
   when showDebug debugOverlay
 
 tour :: ChibiUI Model ()
@@ -66,38 +71,38 @@ tour = do
 
   -- Buttons and state. Inside a row, children flow left to right.
   _ <- row $ do
-    isLocked <- gets locked
+    isLocked <- use #locked
     disabled isLocked $ do
       minus <- button "-"
-      when minus (modify (\m -> m {count = count m - 1}))
-      label . T.pack . show =<< gets count
+      when minus (#count %= subtract 1)
+      label . T.pack . show =<< use #count
       plus <- button "+"
-      when plus (modify (\m -> m {count = count m + 1}))
-    edit locked (\v m -> m {locked = v}) (checkbox "lock")
+      when plus (#count %= (+ 1))
+    edit #locked (checkbox "lock")
 
   separatorText "fields"
 
-  -- Text and number fields. 'edit' shows part of the model in a widget
-  -- and keeps what the widget returns.
+  -- Text and number fields. 'edit' shows a field of the model, named by
+  -- its label, in a widget and keeps what the widget returns.
   _ <- labeled "name" $ do
     fillWidth
-    edit name (\v m -> m {name = v}) (textInputHint "your name")
+    edit #name (textInputHint "your name")
   _ <- labeled "temp" $ do
-    _ <- edit temperature (\v m -> m {temperature = v}) floatInput
-    edit temperature (\v m -> m {temperature = v}) (`dragFloat` 0.1)
+    _ <- edit #temperature floatInput
+    edit #temperature (`dragFloat` 0.1)
   labelDim "Drag to select; double-click a word; right-click to edit."
   labelDim "Tab: focus | Shift+F10: menu | Ctrl/Cmd+Z: undo | F12: debug"
 
   -- Slider and line plot.
   labeled "frequency" $ do
     nextWidth 180
-    v <- edit volume (\v m -> m {volume = v}) (\x -> slider x 0 1)
+    v <- edit #volume (\x -> slider x 0 1)
     nextWidth 80
     progressBar v
   panel "plot" $ do
-    shown <- edit showPlot (\v m -> m {showPlot = v}) (checkbox "show plot")
-    vol <- gets volume
-    shape <- edit wave (\v m -> m {wave = v}) (radio [("sine", Sine), ("saw", Saw)])
+    shown <- edit #showPlot (checkbox "show plot")
+    vol <- use #volume
+    shape <- edit #wave (radio [("sine", Sine), ("saw", Saw)])
     let sample x = case shape of
           Sine -> sin x
           Saw -> x / pi - 2 * fromIntegral (floor (x / (2 * pi)) :: Int)
@@ -107,12 +112,12 @@ tour = do
       plotLines [sample (fromIntegral i * 0.25 * (1 + vol)) | i <- [0 .. 59 :: Int]]
 
   newline
-  hi <- edit salutation (\v m -> m {salutation = v})
+  hi <- edit #salutation
     (combo [("hello", "hello"), ("hi", "hi"), ("howdy", "howdy")])
-  let greeting = (\value -> hi <> ", " <> value <> "!") <$> gets name
+  let greeting = (\value -> hi <> ", " <> value <> "!") <$> use #name
   label =<< greeting
   contextMenu [("Copy greeting", setClipboard =<< greeting),
-               ("Reset counter", modify (\m -> m {count = 0}))]
+               ("Reset counter", #count .= 0)]
 
   space 4
 
@@ -123,7 +128,7 @@ tour = do
   space 4
 
   -- Tabs pick which page shows below them; each page is one keyed group.
-  page <- edit tab (\v m -> m {tab = v}) (tabs ["table", "tree", "notes"])
+  page <- edit #tab (tabs ["table", "tree", "notes"])
   column $ case page of
     0 -> withKey "table" $ do
       -- Table with row selection.
@@ -139,7 +144,7 @@ tour = do
           selectableText "Widgets.hs"
         selectableText "README.md"
     _ -> withKey "notes" $ do
-      _ <- edit notes (\v m -> m {notes = v}) textArea
+      _ <- edit #notes textArea
       pure ()
 
   space 4

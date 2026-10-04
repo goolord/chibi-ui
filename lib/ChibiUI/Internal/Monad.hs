@@ -110,6 +110,7 @@ import Data.IORef
 import qualified Data.IntMap.Strict as IM
 import Data.Text (Text)
 import Data.Word (Word64)
+import Lens.Micro (Lens', set, (^.))
 import ChibiUI.Internal.Context
   ( Context (..)
   , ModelAccess (..)
@@ -145,35 +146,35 @@ instance MonadState model (ChibiUI model) where
 mapMsg :: (msg -> parentMsg) -> ChibiUI model msg -> ChibiUI model parentMsg
 mapMsg = fmap
 
--- | Run a child view against part of the model. The setter takes the updated
--- child and the current parent. Reads and writes are live, including actions
--- retained by a context menu. Layout, focus and widget identity are shared;
--- use 'withKey' when separate children need stable identities.
+-- | Run a child view against part of the model, focused by a lens. Reads
+-- and writes are live, including actions retained by a context menu.
+-- Layout, focus and widget identity are shared; use 'withKey' when
+-- separate children need stable identities.
 --
--- > mapModel count (\n m -> m {count = n}) counter
+-- > mapModel (lens count (\m n -> m {count = n})) counter
 --
--- Getter and setter should obey the usual lens laws: setting what was read
--- changes nothing, reading what was set returns it, and the latest set wins.
-mapModel :: (parent -> child) -> (child -> parent -> parent) -> ChibiUI child a -> ChibiUI parent a
-mapModel project replace (ChibiUI view) = ChibiUI (withReaderT focus view)
+-- With "ChibiUI.Labels", a record field is its label:
+--
+-- > mapModel #count counter
+mapModel :: Lens' parent child -> ChibiUI child a -> ChibiUI parent a
+mapModel focusing (ChibiUI view) = ChibiUI (withReaderT focus view)
   where
     focus ctx = ctx {ctxModel = access}
       where
         parent = ctxModel ctx
         access = ModelAccess
-          { readModel = project <$> readModel parent
-          , stateModel = \f -> stateModel parent $ \whole ->
-              let (result, child) = f (project whole) in (result, replace child whole)
+          { readModel = (^. focusing) <$> readModel parent
+          , stateModel = stateModel parent . focusing
           }
 
--- | Show part of the model in a widget and keep what the widget returns,
--- with a getter and setter as 'mapModel' takes them. Returns the new value.
+-- | Show part of the model, focused by a lens, in a widget and keep what
+-- the widget returns. Returns the new value.
 --
--- > edit name (\v m -> m {name = v}) textInput
-edit :: (model -> a) -> (a -> model -> model) -> (a -> ChibiUI model a) -> ChibiUI model a
-edit project replace widget = do
-  v <- widget =<< gets project
-  modify (replace v)
+-- > edit #name textInput
+edit :: Lens' model a -> (a -> ChibiUI model a) -> ChibiUI model a
+edit focusing widget = do
+  v <- widget =<< gets (^. focusing)
+  modify (set focusing v)
   pure v
 
 -- | Run an action against a context, retaining any model updates in it.

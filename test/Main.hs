@@ -1,3 +1,4 @@
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Headless frame tests: run views against a context with scripted input
@@ -12,9 +13,12 @@ import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable (peekByteOff)
 import qualified Data.Text as T
+import GHC.Generics (Generic)
+import Lens.Micro (_1, _2, (%~))
 import System.Info (os)
 import ChibiUI
 import ChibiUI.Backend
+import qualified ChibiUI.Labels as Labels
 
 main :: IO ()
 main = do
@@ -113,7 +117,7 @@ bigRect rs = case rs of
   _ -> pure (foldr1 (\a b -> if rectH a >= rectH b then a else b) rs)
 
 data Model = Model {modelCount :: Int, modelText :: Text}
-  deriving (Eq, Show)
+  deriving (Eq, Generic, Show)
 
 testCounter :: IO ()
 testCounter = do
@@ -166,7 +170,7 @@ testModel = do
 testModelMapping :: IO ()
 testModelMapping = do
   ctx <- newContext (Model 3 "seed")
-  let countView = mapModel modelCount (\n m -> m {modelCount = n})
+  let countView = mapModel (lens modelCount (\m n -> m {modelCount = n}))
   message <- runChibiUI ctx $ mapMsg show $ countView $ do
     modify (+ 2)
     -- Interleaving a parent update must not be overwritten by a child write.
@@ -193,8 +197,8 @@ testModelMapping = do
 testMappedMenu :: IO ()
 testMappedMenu = do
   ctx <- newContext (Model 0 "seed", False)
-  let view = mapModel fst (\m (_, flag) -> (m, flag)) $
-        mapModel modelCount (\n m -> m {modelCount = n}) $ do
+  let view = mapModel _1 $
+        mapModel (Labels.field @"modelCount") $ do
           label "target"
           contextMenu [("Increment", modify (+ 1)), ("Replace", put 7)]
           get
@@ -622,10 +626,18 @@ testLabeled = do
 testEdit :: IO ()
 testEdit = do
   ctx <- newContext (Model 1 "keep")
-  let view = edit modelCount (\v m -> m {modelCount = v}) (\n -> pure (n * 10))
+  let view = edit #modelCount (\n -> pure (n * 10))
   shown <- frame ctx id view
   after <- runChibiUI ctx get
   assert "edit: value not shown or kept" (shown == 10 && after == Model 10 "keep")
+  -- Labels are plain lenses: they compose, and other lens functions take them.
+  nested <- newContext (False, Model 2 "deep")
+  deep <- runChibiUI nested $ do
+    modify ((_2 . #modelText) %~ (<> "er"))
+    _ <- mapModel _2 (edit #modelCount (pure . (+ 1)))
+    get
+  assert ("labels: nested focus lost or overwrote siblings: " ++ show deep)
+    (deep == (False, Model 3 "deeper"))
 
 -- 'fillWidth' stretches the next widget to the right edge of its scope,
 -- here the window less its padding.

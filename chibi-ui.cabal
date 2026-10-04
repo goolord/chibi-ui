@@ -56,11 +56,13 @@ library
         ChibiUI
         ChibiUI.Backend
         ChibiUI.Backend.Rgfw
+        ChibiUI.Labels
     other-modules:
         ChibiUI.Internal.Context
         ChibiUI.Internal.Damage
         ChibiUI.Internal.Draw
         ChibiUI.Internal.Editor
+        ChibiUI.Internal.Field
         ChibiUI.Internal.Menu
         ChibiUI.Internal.Font
         ChibiUI.Internal.Frame
@@ -91,6 +93,7 @@ library
         bytestring ^>=0.12,
         containers >=0.7 && <0.9,
         file-embed ^>=0.0.16,
+        microlens ^>=0.5,
         mtl ^>=2.3,
         text ^>=2.1
     if os(windows)
@@ -110,6 +113,7 @@ executable chibi-ui-demo
         base >=4.20 && <4.23,
         bytestring ^>=0.12,
         chibi-ui,
+        microlens-mtl ^>=0.2.1,
         text ^>=2.1
     ghc-options:      -threaded
 
@@ -123,6 +127,7 @@ executable chibi-ui-membench
         base >=4.20 && <4.23,
         bytestring ^>=0.12,
         chibi-ui,
+        microlens-mtl ^>=0.2.1,
         text ^>=2.1
     ghc-options:      -threaded -with-rtsopts=-T
 
@@ -135,4 +140,5 @@ test-suite chibi-ui-test
     build-depends:
         base >=4.20 && <4.23,
         chibi-ui,
+        microlens ^>=0.5,
         text ^>=2.1

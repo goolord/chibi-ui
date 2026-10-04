@@ -38,6 +38,9 @@
 --   Escape restores the value from focus time.
 -- * Application state is a user-defined model. 'get'/'gets' read it and
 --   'put'/'modify' update it immediately, with changes retained across frames.
+--   'edit' and 'mapModel' focus part of it with a lens: one from microlens
+--   or lens, 'lens' from a getter and setter, or with "ChibiUI.Labels", a
+--   'Generic' record's field by its label: @edit #name textInput@.
 -- * Transient widget state (focus, drafts, scrolling) follows widget identity.
 --   'withKey' keeps that identity stable when widgets reorder or disappear.
 -- * 'nextWidth' and 'nextHeight' size the next widget, instead of its
@@ -56,6 +59,8 @@ module ChibiUI
   , modify'
   , mapModel
   , edit
+  , Lens'
+  , lens
 
     -- * Widgets
   , label
@@ -191,6 +196,7 @@ module ChibiUI
 
 import Control.Monad (unless, when)
 import Data.Text (Text)
+import Lens.Micro (Lens', lens)
 import qualified Data.Text as Text
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input (Key (..), Modifiers (..), MouseButton (..), noModifiers)

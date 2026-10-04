@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `mapModel` and `edit` take a microlens `Lens'` in place of a getter and
+  setter pair, so lenses from microlens, lens or generic-lens work as they
+  are: `mapModel _1 view`. `ChibiUI` re-exports `Lens'` and `lens` to build
+  one from a getter and setter.
+
+- Added `ChibiUI.Labels`: with it imported and `OverloadedLabels` on, `#name`
+  is a lens onto the `name` field of a record deriving `Generic`
+  (`field @"name"` without the extension). They compose with other lenses
+  and work with microlens-mtl's `use`, `.=` and `%=`:
+  `when up (#count %= (+ 1))`.
+
 - Nested scroll regions: the wheel scrolls the innermost `scrollColumn` or
   `textArea` under the pointer, and the region around it once that one
   reaches its end. Before, it scrolled every region under the pointer.
@@ -35,9 +46,9 @@
 
 - Added `fillWidth`: the next widget takes the rest of the line's width.
 
-- Added `edit getter setter widget`: show part of the model in a widget and
-  keep what it returns, in place of `gets` and `modify` around it:
-  `edit name (\v m -> m {name = v}) textInput`.
+- Added `edit lens widget`: show part of the model in a widget and keep
+  what it returns, in place of `gets` and `modify` around it:
+  `edit #name textInput`.
 
 - Added `labeled caption body`: a caption and a widget in a row, the
   caption aligned with a field, in place of `row`, `alignTextToFrame` and
