@@ -22,11 +22,9 @@ data Model = Model { count :: Int }
 counter :: ChibiUI Model ()
 counter = do
   up <- button "+"
-  when up (modify (\m -> m { count = count m + 1 }))
-  sameLine
+  when up (modify (\m -> m { count = count m + 1 })) <* sameLine
   n <- gets count
-  label (T.pack (show n))
-  sameLine
+  label (T.pack (show n)) <* sameLine
   down <- button "-"
   when down (modify (\m -> m { count = count m - 1 }))
 ```
