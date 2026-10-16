@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Retuned `defaultTheme` and `lightTheme`: cooler neutrals, softer borders,
+  brighter text and a calmer accent, with an 8px gap between widgets (was 6).
+
 - `mapModel` and `edit` take a microlens `Lens'` in place of a getter and
   setter pair, so lenses from microlens, lens or generic-lens work as they
   are: `mapModel _1 view`. `ChibiUI` re-exports `Lens'` and `lens` to build

@@ -51,18 +51,18 @@ data Theme = Theme
 defaultTheme :: Theme
 defaultTheme =
   Theme
-    { themeWindow = colorRGBA 24 24 27 255
-    , themeSurface = colorRGBA 39 39 42 255
-    , themeSurfaceHover = colorRGBA 52 52 56 255
-    , themeSurfaceActive = colorRGBA 63 63 68 255
-    , themeBorder = colorRGBA 82 82 88 255
-    , themeText = colorRGBA 220 220 218 255
-    , themeTextDim = colorRGBA 145 145 148 255
-    , themeAccent = colorRGBA 98 160 234 255
-    , themeAccentText = colorRGBA 18 18 20 255
-    , themeRowAlt = colorRGBA 31 31 34 255
-    , themeRowHover = colorRGBA 46 46 50 255
-    , themeGap = 6
+    { themeWindow = colorRGBA 28 29 33 255
+    , themeSurface = colorRGBA 38 39 44 255
+    , themeSurfaceHover = colorRGBA 47 49 55 255
+    , themeSurfaceActive = colorRGBA 57 60 67 255
+    , themeBorder = colorRGBA 66 68 77 255
+    , themeText = colorRGBA 227 228 232 255
+    , themeTextDim = colorRGBA 150 153 163 255
+    , themeAccent = colorRGBA 110 160 245 255
+    , themeAccentText = colorRGBA 16 18 24 255
+    , themeRowAlt = colorRGBA 33 34 39 255
+    , themeRowHover = colorRGBA 44 46 52 255
+    , themeGap = 8
     , themeWindowPad = 10
     , themeTextAlign = AlignMiddle
     }
@@ -71,17 +71,17 @@ defaultTheme =
 lightTheme :: Theme
 lightTheme =
   defaultTheme
-    { themeWindow = colorRGBA 247 247 245 255
+    { themeWindow = colorRGBA 246 246 248 255
     , themeSurface = colorRGBA 255 255 255 255
-    , themeSurfaceHover = colorRGBA 236 236 233 255
-    , themeSurfaceActive = colorRGBA 224 224 220 255
-    , themeBorder = colorRGBA 176 176 172 255
-    , themeText = colorRGBA 34 34 36 255
-    , themeTextDim = colorRGBA 120 120 118 255
-    , themeAccent = colorRGBA 34 102 190 255
+    , themeSurfaceHover = colorRGBA 238 239 242 255
+    , themeSurfaceActive = colorRGBA 225 227 233 255
+    , themeBorder = colorRGBA 192 195 203 255
+    , themeText = colorRGBA 28 30 36 255
+    , themeTextDim = colorRGBA 102 106 116 255
+    , themeAccent = colorRGBA 37 99 205 255
     , themeAccentText = colorRGBA 255 255 255 255
-    , themeRowAlt = colorRGBA 240 240 237 255
-    , themeRowHover = colorRGBA 226 226 222 255
+    , themeRowAlt = colorRGBA 241 242 245 255
+    , themeRowHover = colorRGBA 230 232 237 255
     }
 
 -- | Space between a widget's box and its text.
