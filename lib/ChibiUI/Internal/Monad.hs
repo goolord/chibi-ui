@@ -101,32 +101,33 @@ module ChibiUI.Internal.Monad
   , setClipboard
   ) where
 
-import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad (when)
+import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader (..), ReaderT (..), asks, withReaderT)
 import Control.Monad.State.Class (MonadState (..), gets, modify, modify')
-import qualified Data.ByteString as BS
+import Data.ByteString qualified as BS
 import Data.IORef
-import qualified Data.IntMap.Strict as IM
+import Data.IntMap.Strict qualified as IM
 import Data.Text (Text)
 import Data.Word (Word64)
 import Lens.Micro (Lens', set, (^.))
+
 import ChibiUI.Internal.Context
   ( Context (..)
-  , ModelAccess (..)
   , ImageEntry (..)
+  , ModelAccess (..)
   , Wake (..)
   , noWidget
   )
 import ChibiUI.Internal.Draw
-import ChibiUI.Internal.Font (lineHeight, fontDrawText, fontMeasure, fontScale)
+import ChibiUI.Internal.Font (fontDrawText, fontMeasure, fontScale, lineHeight)
 import ChibiUI.Internal.Id
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Layout (LayoutState)
-import qualified ChibiUI.Internal.Layout as Layout
+import ChibiUI.Internal.Layout qualified as Layout
 import ChibiUI.Internal.RectTable (insertRect, lookupRect)
 import ChibiUI.Internal.Store
-import ChibiUI.Internal.Style (Theme (..), TextAlign, alignedTextY, fieldHeight, widgetPad)
+import ChibiUI.Internal.Style (TextAlign, Theme (..), alignedTextY, fieldHeight, widgetPad)
 import ChibiUI.Internal.Types
 
 -- | A view, or one widget's body, with access to an application model.
@@ -310,15 +311,15 @@ newline = layoutCommand Layout.Newline
 -- group occupies one item in its parent. Preferred over repeated 'sameLine'
 -- for any run of two or more widgets.
 row :: ChibiUI model a -> ChibiUI model a
-row = group True
+row = group Layout.Flowing
 
 -- | Lay out a vertical group, reserving its full bounds in the parent.
 column :: ChibiUI model a -> ChibiUI model a
-column = group False
+column = group Layout.Stacked
 
-group :: Bool -> ChibiUI model a -> ChibiUI model a
-group horizontal body = do
-  (a, size) <- layoutScope (Layout.beginGroup horizontal) Layout.endGroup body
+group :: Layout.LineMode -> ChibiUI model a -> ChibiUI model a
+group mode body = do
+  (a, size) <- layoutScope (Layout.beginGroup mode) Layout.endGroup body
   a <$ place size
 
 -- | Indent a body's lines by @n@ logical pixels.

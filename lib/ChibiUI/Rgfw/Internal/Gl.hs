@@ -22,16 +22,20 @@ module ChibiUI.Rgfw.Internal.Gl
   , readRetainedPixels
   ) where
 
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (unless, when)
+import Data.ByteString qualified as BS
+import Data.ByteString.Internal qualified as BSI
+import Data.ByteString.Unsafe qualified as BSU
+import Data.Foldable (for_, traverse_)
 import Data.IORef
 import Data.Int (Int32)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Internal as BSI
-import qualified Data.ByteString.Unsafe as BSU
-import qualified Data.IntMap.Strict as IM
+import Data.IntMap.Strict qualified as IM
+import Data.Maybe (mapMaybe)
+import Data.Traversable (for)
 import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr, nullPtr)
+
 import ChibiUI.Internal.Context (ImageEntry (..))
 import ChibiUI.Internal.Damage (Damage (..), FrameSnapshot, Upload (..), trackUploads)
 import ChibiUI.Internal.Draw
@@ -130,7 +134,9 @@ renderFrameGl r font images !scale !fbW !fbH bg window drawData = do
       uploadGeometry h drawData upload
       case damage of
         DamageRects rs | not full -> drawDamaged h scale fbW fbH drawData rs bgR bgG bgB
-        _ -> mapM_ (drawCmd h (0, 0, fbW, fbH)) (drawCommands drawData)
+        DamageRects _ -> traverse_ (drawCmd h (0, 0, fbW, fbH)) (drawCommands drawData)
+        DamageFull -> traverse_ (drawCmd h (0, 0, fbW, fbH)) (drawCommands drawData)
+        DamageNone -> traverse_ (drawCmd h (0, 0, fbW, fbH)) (drawCommands drawData)
       c_present h
   writeIORef (glFrameSize r) (fbW, fbH)
 
@@ -138,10 +144,10 @@ renderFrameGl r font images !scale !fbW !fbH bg window drawData = do
 -- the buffer holds asks: nothing, the changed quads in runs, or all.
 uploadGeometry :: Ptr ChibiUiGl -> DrawData -> Upload -> IO ()
 uploadGeometry h drawData upload =
-  withForeignPtr (drawVertices drawData) $ \vp -> case upload of
+  withForeignPtr (drawVertices drawData) \vp -> case upload of
     UploadNone -> pure ()
     UploadQuads qs ->
-      forM_ (quadRuns qs) $ \(q, k) -> c_uploadQuads h vp (fromIntegral q) (fromIntegral k)
+      for_ (quadRuns qs) \(q, k) -> c_uploadQuads h vp (fromIntegral q) (fromIntegral k)
     UploadAll -> c_uploadGeometry h vp (fromIntegral (drawVertexCount drawData))
 
 -- | Ascending quad indices as runs of @(first, count)@.
@@ -165,10 +171,10 @@ drawCmd h (x0, y0, x1, y1) cmd =
 -- the scissor discards the rest on the GPU.
 drawDamaged :: Ptr ChibiUiGl -> Float -> Int -> Int -> DrawData -> [Rect] -> Float -> Float -> Float -> IO ()
 drawDamaged h !scale !fbW !fbH drawData rects bgR bgG bgB = do
-  let boxes = [box | dmg <- rects, Just box <- [physClip scale fbW fbH dmg]]
-  forM_ boxes $ \(x0, y0, x1, y1) ->
+  let boxes = mapMaybe (physClip scale fbW fbH) rects
+  for_ boxes \(x0, y0, x1, y1) ->
     c_clearRegion h (fromIntegral x0) (fromIntegral y0) (fromIntegral x1) (fromIntegral y1) bgR bgG bgB
-  forM_ (drawCommands drawData) $ \cmd -> forM_ boxes $ \box -> drawCmd h box cmd
+  for_ (drawCommands drawData) \cmd -> for_ boxes \box -> drawCmd h box cmd
 
 -- | The retained frame's pixels, RGBA rows bottom row first. For debugging
 -- what a frame drew.
@@ -200,8 +206,8 @@ uploadImagesGl :: GlRenderer -> IM.IntMap ImageEntry -> IO Bool
 uploadImagesGl r images = do
   uploaded <- readIORef (glImages r)
   let changed = IM.differenceWith (\e v -> if v == ieVersion e then Nothing else Just e) images uploaded
-  oks <- forM (IM.toList changed) $ \(img, e) ->
-    BSU.unsafeUseAsCString (iePixels e) $ \p ->
+  oks <- for (IM.toList changed) \(img, e) ->
+    BSU.unsafeUseAsCString (iePixels e) \p ->
       (/= 0) <$> c_uploadImage (glHandle r) (fromIntegral img) (fromIntegral (ieWidth e)) (fromIntegral (ieHeight e)) (castPtr p)
   -- Unchanged frames, the common case, leave the map as it is.
   unless (IM.null changed) $ writeIORef (glImages r) (IM.union (ieVersion <$> changed) uploaded)

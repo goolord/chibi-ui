@@ -7,13 +7,16 @@
 -- allocation per frame, peak live bytes, and GC totals from RTS statistics.
 module Main (main) where
 
-import Control.Monad (forM_)
+import Data.Foldable (for_)
 import Data.IORef
 import Data.List (sortOn)
+import Data.Text (Text)
+import Data.Text qualified as T
+import Data.Text.IO qualified as TIO
 import Data.Word (Word64)
-import qualified Data.Text as T
 import GHC.Stats (GCDetails (..), RTSStats (..), getRTSStats)
 import System.Mem (performMajorGC, performMinorGC)
+
 import ChibiUI (get)
 import ChibiUI.Backend
 import DemoCore (Model (..), demo, demoModel)
@@ -23,14 +26,27 @@ windowW, windowH :: Float
 windowW = 520
 windowH = 660
 
+data DamageCounts = DamageCounts
+  { dcFull :: !Int
+  , dcRects :: !Int
+  , dcNone :: !Int
+  }
+  deriving stock (Eq, Show)
+
+emptyCounts :: DamageCounts
+emptyCounts = DamageCounts 0 0 0
+
+diffCounts :: DamageCounts -> DamageCounts -> DamageCounts
+diffCounts (DamageCounts f r n) (DamageCounts f' r' n') =
+  DamageCounts (f - f') (r - r') (n - n')
+
 -- | One benchmark run: a context, the session-like input reference, the
 -- damage snapshot, and damage tallies.
 data Bench = Bench
   { benchContext :: Context Model
   , benchInput :: IORef Input
   , benchSnap :: IORef (Maybe FrameSnapshot)
-  , benchDamage :: IORef (Int, Int, Int)
-  -- ^ full, rects, none
+  , benchDamage :: IORef DamageCounts
   }
 
 newBench :: IO Bench
@@ -38,7 +54,7 @@ newBench = do
   ctx <- newContext demoModel
   inp <- newIORef (emptyInput {inputWindowSize = Size windowW windowH})
   snap <- newIORef Nothing
-  dmg <- newIORef (0, 0, 0)
+  dmg <- newIORef emptyCounts
   pure (Bench ctx inp snap dmg)
 
 -- | Run one frame with a tweak, mirroring the session loop: the tweak folds
@@ -51,10 +67,10 @@ stepFrame b tweak = do
   writeIORef (benchInput b) inp
   (_, dd) <- runFrame (benchContext b) inp demo
   dmg <- trackFrame (benchSnap b) (inputWindowSize inp) dd
-  let bump (f, r, n) = case dmg of
-        DamageFull -> (f + 1, r, n)
-        DamageRects _ -> (f, r + 1, n)
-        DamageNone -> (f, r, n + 1)
+  let bump c = case dmg of
+        DamageFull -> c {dcFull = dcFull c + 1}
+        DamageRects _ -> c {dcRects = dcRects c + 1}
+        DamageNone -> c {dcNone = dcNone c + 1}
   modifyIORef' (benchDamage b) bump
   writeIORef (benchInput b) (clearEphemeral inp)
   pure dmg
@@ -63,47 +79,39 @@ stepFrame b tweak = do
 data PhaseStats = PhaseStats
   { psFrames :: !Int
   , psBytes :: !Word64
-  , psDamage :: !(Int, Int, Int)
+  , psDamage :: !DamageCounts
   }
 
 -- | Run @n@ frames with per-frame tweaks numbered @0 .. n - 1@ and measure
 -- the allocation delta. The RTS counts allocation at collections, so a
 -- minor collection on each side pins the count to the phase.
-phase :: Bench -> String -> Int -> (Int -> Input -> Input) -> IO PhaseStats
-phase b name n tweak = do
+phase :: Bench -> Text -> Int -> (Int -> Input -> Input) -> IO PhaseStats
+phase b phaseName n tweak = do
   performMinorGC
   s0 <- getRTSStats
   d0 <- readIORef (benchDamage b)
-  forM_ [0 .. n - 1] $ \i -> stepFrame b (tweak i)
+  for_ [0 .. n - 1] \i -> stepFrame b (tweak i)
   performMinorGC
   s1 <- getRTSStats
   d1 <- readIORef (benchDamage b)
   let bytes = allocated_bytes s1 - allocated_bytes s0
-      ps = PhaseStats n bytes (diff3 d1 d0)
-  reportPhase name ps
+      ps = PhaseStats n bytes (diffCounts d1 d0)
+  reportPhase phaseName ps
   pure ps
-  where
-    diff3 (f, r, e) (f', r', e') = (f - f', r - r', e - e')
 
 -- | Print one phase's line: average bytes per frame and damage mix.
-reportPhase :: String -> PhaseStats -> IO ()
-reportPhase name ps = do
-  let (f, r, e) = psDamage ps
+reportPhase :: Text -> PhaseStats -> IO ()
+reportPhase phaseName ps = do
+  let DamageCounts f r e = psDamage ps
       kbPerFrame = fromIntegral (psBytes ps) / 1024 / max 1 (fromIntegral (psFrames ps)) :: Double
-  putStrLn
-    ( padRight 10 name
-        ++ " frames " ++ padLeft 5 (show (psFrames ps))
-        ++ "  alloc/frame " ++ padLeft 9 (kb1 kbPerFrame) ++ " KB"
-        ++ "  damage full/rects/none " ++ show f ++ "/" ++ show r ++ "/" ++ show e
-    )
+  TIO.putStrLn $
+    T.justifyLeft 10 ' ' phaseName
+      <> " frames " <> T.justifyRight 5 ' ' (T.pack (show (psFrames ps)))
+      <> "  alloc/frame " <> T.justifyRight 9 ' ' (kb1 kbPerFrame) <> " KB"
+      <> "  damage full/rects/none "
+      <> T.pack (show f <> "/" <> show r <> "/" <> show e)
   where
-    kb1 x = show (fromIntegral (round (x * 10) :: Int) / 10)
-
-padRight :: Int -> String -> String
-padRight n s = s ++ replicate (max 0 (n - length s)) ' '
-
-padLeft :: Int -> String -> String
-padLeft n s = replicate (max 0 (n - length s)) ' ' ++ s
+    kb1 x = T.pack (show (fromIntegral (round (x * 10) :: Int) / 10 :: Double))
 
 -- | Pointer position helpers.
 at :: Float -> Float -> Input -> Input
@@ -114,7 +122,7 @@ pressLeft = applyMouseButton MouseLeft True
 releaseLeft = applyMouseButton MouseLeft False
 
 typeChar :: Char -> Input -> Input
-typeChar c inp = inp {inputChars = inputChars inp ++ [c]}
+typeChar c inp = inp {inputChars = T.snoc (inputChars inp) c}
 
 pressKey :: Key -> Input -> Input
 pressKey k inp = inp {inputKeys = inputKeys inp ++ [k]}
@@ -147,7 +155,7 @@ main = do
   performMinorGC
   s0 <- getRTSStats
   d0 <- readIORef (benchDamage b)
-  forM_ tour $ \(x, y) -> do
+  for_ tour \(x, y) -> do
     _ <- stepFrame b (at x y . pressLeft)
     _ <- stepFrame b (at x y . releaseLeft)
     _ <- stepFrame b (typeChar 'x')
@@ -160,10 +168,10 @@ main = do
     PhaseStats
       { psFrames = length tour * 3
       , psBytes = allocated_bytes s1 - allocated_bytes s0
-      , psDamage = d1 `minus` d0
+      , psDamage = diffCounts d1 d0
       }
   -- Typing with focus moving by Tab every ten frames.
-  _ <- phase b "typing" 120 $ \i ->
+  _ <- phase b "typing" 120 \i ->
     let tab = if i `mod` 10 == 0 then pressKey KeyTab else id
         chars = typeChar (T.index "the quick brown fox" (i `mod` 19))
      in chars . tab
@@ -172,7 +180,7 @@ main = do
   -- Totals.
   performMajorGC
   s <- getRTSStats
-  (f, r, e) <- readIORef (benchDamage b)
+  DamageCounts f r e <- readIORef (benchDamage b)
   model <- runChibiUI (benchContext b) get
   putStrLn ""
   putStrLn ("model survived: name=" ++ show (name model) ++ " count=" ++ show (count model))
@@ -191,5 +199,4 @@ main = do
         ++ show f ++ "/" ++ show r ++ "/" ++ show e
     )
   where
-    minus (f, r, e) (f', r', e') = (f - f', r - r', e - e')
     mb w = show (fromIntegral w / 1048576 :: Double)

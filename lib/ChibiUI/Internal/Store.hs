@@ -22,8 +22,9 @@ module ChibiUI.Internal.Store
   ) where
 
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntMap.Strict as IM
+import Data.IntMap.Strict qualified as IM
 import Data.Text (Text)
+
 import ChibiUI.Internal.Editor (Command, Editor)
 import ChibiUI.Internal.Types (V2)
 
@@ -88,8 +89,12 @@ writeState (StoreMap get set) k v st = set (maybe (IM.delete k) (IM.insert k) v 
 
 -- | A scroll region's offset, the extent of its body when last run, and
 -- where along the thumb the pointer holds it while dragging the scrollbar.
-data ScrollState = ScrollState !Float !Float !Float
-  deriving (Eq)
+data ScrollState = ScrollState
+  { ssOffset :: !Float
+  , ssExtent :: !Float
+  , ssGrab :: !Float
+  }
+  deriving stock (Eq, Show)
 
 -- | What a text field keeps between frames.
 data FieldState = FieldState
@@ -101,14 +106,18 @@ data FieldState = FieldState
   , fieldQueued :: !(Maybe Command)
   -- ^ A command the field's menu chose, run on the next frame.
   }
-  deriving (Eq)
+  deriving stock (Eq, Show)
 
 -- | An inactive editor retains undo history; an editing session also owns
 -- the focus-time value. The draft and its cancellation target cannot drift
 -- apart.
 data Draft = Inactive !Editor | Editing !Text !Editor
-  deriving (Eq)
+  deriving stock (Eq, Show)
 
 -- | A press on a text field: when, where, and how many presses in a row.
-data ClickState = ClickState !Double !V2 !Int
-  deriving (Eq)
+data ClickState = ClickState
+  { csTime :: !Double
+  , csPos :: !V2
+  , csCount :: !Int
+  }
+  deriving stock (Eq, Show)

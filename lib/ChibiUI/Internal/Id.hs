@@ -13,7 +13,7 @@ module ChibiUI.Internal.Id
 
 import Data.Bits (shiftR, xor)
 import Data.Text (Text)
-import qualified Data.Text as T
+import Data.Text qualified as T
 import Data.Word (Word64)
 
 -- | Stable store and interaction identity. Zero is reserved for no widget.

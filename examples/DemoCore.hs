@@ -10,11 +10,13 @@ module DemoCore
   , gradientPixels
   ) where
 
-import qualified Data.Text as T
-import qualified Data.ByteString as BS
+import Data.ByteString qualified as BS
+import Data.Foldable (traverse_)
+import Data.Text qualified as T
 import Data.Word (Word8)
 import GHC.Generics (Generic)
 import Lens.Micro.Mtl (use, (%=), (.=))
+
 import ChibiUI
 import ChibiUI.Labels ()
 
@@ -31,10 +33,10 @@ data Model = Model
   , locked :: !Bool
   , debug :: !Bool
   }
-  deriving (Generic)
+  deriving stock (Generic)
 
 data Wave = Sine | Saw
-  deriving (Eq)
+  deriving stock (Eq, Show)
 
 -- | The model the demo starts with.
 demoModel :: Model
@@ -153,7 +155,7 @@ tour = do
   -- the nested region takes a fixed one.
   nextHeight 160
   scrollColumn $ do
-    mapM_ (\i -> label ("row " <> T.pack (show (i :: Int)))) [1 .. 40]
+    traverse_ (\i -> label ("row " <> T.pack (show (i :: Int)))) [1 .. 40]
 
 -- | A blue-to-white gradient, four bytes per pixel, top row first.
 gradientPixels :: Int -> Int -> BS.ByteString

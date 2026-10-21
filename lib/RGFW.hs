@@ -26,25 +26,27 @@ module RGFW
   )
 where
 
+import Control.Monad (mfilter)
+import Data.ByteString qualified as BS
 import Data.ByteString.Unsafe (unsafePackCStringLen)
 import Data.Char (chr)
 import Data.Function (on)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8Lenient)
+import Data.Text.Encoding (decodeUtf8Lenient, encodeUtf8)
 import Data.Text.Foreign qualified as TF
-import Data.Word (Word32, Word8)
-import Foreign.C.String (withCString)
+import Data.Word (Word8, Word32)
 import Foreign.C.Types (CSize (..), CUChar (..), CUInt (..))
 import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Ptr (Ptr, nullPtr)
 import Foreign.Storable (peek)
+
 import RGFW.Raw
 
 -- | Owned native window. Close exactly once with 'closeWindow'; there is no
 -- finalizer. Window and OpenGL operations belong on the creating OS thread.
 newtype Window = Window (Ptr RGFW_window)
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | A copied native event. Key events carry RGFW key codes of physical keys
 -- and modifier bits; motion coordinates are native window pixels, not
@@ -55,23 +57,32 @@ data Event
   -- ^ A press, or the auto-repeat of a held key.
   | EventKeyRelease !Word32 !Word8
   | EventKeyChar !Char
-  | EventMouseButton !Word8 !Bool -- Button, Pressed
+  | EventMouseButton !Word8 !Bool
+  -- ^ Button code and whether it was pressed.
   | EventMouseMotion !Int !Int
   | EventMouseScroll !Float !Float
   -- ^ Wheel steps on x and y: positive is left and up.
   | EventWindowClose
   | EventOther !Word8
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | Create a window with a core-profile OpenGL context of at least the
 -- given major/minor version made current on the calling OS thread. 'Nothing'
 -- when the window or the context cannot be created.
-createWindowGL ::
-  String -> Int -> Int -> Int -> Int -> Word32 -> Int -> Int -> IO (Maybe Window)
+createWindowGL
+  :: Text -> Int -> Int -> Int -> Int -> Word32 -> Int -> Int -> IO (Maybe Window)
 createWindowGL title x y w h flags major minor =
-  withCString title $ \cTitle -> do
-    ptr <- c_rgfw_create_window_gl cTitle (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral h)
-      (fromIntegral flags) (fromIntegral major) (fromIntegral minor)
+  BS.useAsCString (encodeUtf8 title) \cTitle -> do
+    ptr <-
+      c_rgfw_create_window_gl
+        cTitle
+        (fromIntegral x)
+        (fromIntegral y)
+        (fromIntegral w)
+        (fromIntegral h)
+        (fromIntegral flags)
+        (fromIntegral major)
+        (fromIntegral minor)
     pure (if ptr == nullPtr then Nothing else Just (Window ptr))
 
 -- | Present the OpenGL back buffer. The window's context must be current.
@@ -103,38 +114,41 @@ pollEvent (Window win) evPtr = do
     then pure EventNone
     else do
       CUChar t <- c_rgfw_event_type evPtr
-      case t of
-        _
-          | t == rgfw_keyPressed || t == rgfw_keyReleased -> do
-              CUInt val <- c_rgfw_event_key_value evPtr
-              CUChar m <- c_rgfw_event_key_mod evPtr
-              pure ((if t == rgfw_keyReleased then EventKeyRelease else EventKeyPress) val m)
-          | t == rgfw_keyChar -> do
-              CUInt val <- c_rgfw_event_keyChar_value evPtr
-              let
-                !cInt = fromIntegral val :: Int
-              -- An invalid code point is still an event: reporting EventNone
-              -- would read as an empty queue and stall the rest of the batch.
-              if (cInt >= 0 && cInt <= 0x10FFFF) && not (cInt >= 0xD800 && cInt <= 0xDFFF)
-                then pure (EventKeyChar (chr cInt))
-                else pure (EventOther t)
-          | t == rgfw_mouseButtonPressed || t == rgfw_mouseButtonReleased -> do
-              CUChar b <- c_rgfw_event_button_value evPtr
-              pure (EventMouseButton b (t == rgfw_mouseButtonPressed))
-          | t == rgfw_mouseMotion ->
-              liftA2
-                (EventMouseMotion `on` fromIntegral)
-                (c_rgfw_event_mouse_x evPtr)
-                (c_rgfw_event_mouse_y evPtr)
-          | t == rgfw_mouseScroll ->
-              liftA2
-                (EventMouseScroll `on` realToFrac)
-                (c_rgfw_event_delta_x evPtr)
-                (c_rgfw_event_delta_y evPtr)
-          | t == rgfw_windowClose ->
-              pure EventWindowClose
-          | otherwise ->
-              pure (EventOther t)
+      decodeEvent evPtr t
+
+decodeEvent :: Ptr RGFW_event -> Word8 -> IO Event
+decodeEvent evPtr t
+  | t == rgfw_keyPressed || t == rgfw_keyReleased = do
+      CUInt val <- c_rgfw_event_key_value evPtr
+      CUChar m <- c_rgfw_event_key_mod evPtr
+      let ctor = if t == rgfw_keyReleased then EventKeyRelease else EventKeyPress
+      pure (ctor val m)
+  | t == rgfw_keyChar = do
+      CUInt val <- c_rgfw_event_keyChar_value evPtr
+      let !cp = fromIntegral val :: Int
+      -- An invalid code point is still an event: reporting EventNone
+      -- would read as an empty queue and stall the rest of the batch.
+      pure (if isValidCodePoint cp then EventKeyChar (chr cp) else EventOther t)
+  | t == rgfw_mouseButtonPressed || t == rgfw_mouseButtonReleased = do
+      CUChar b <- c_rgfw_event_button_value evPtr
+      pure (EventMouseButton b (t == rgfw_mouseButtonPressed))
+  | t == rgfw_mouseMotion =
+      liftA2
+        (EventMouseMotion `on` fromIntegral)
+        (c_rgfw_event_mouse_x evPtr)
+        (c_rgfw_event_mouse_y evPtr)
+  | t == rgfw_mouseScroll =
+      liftA2
+        (EventMouseScroll `on` realToFrac)
+        (c_rgfw_event_delta_x evPtr)
+        (c_rgfw_event_delta_y evPtr)
+  | t == rgfw_windowClose =
+      pure EventWindowClose
+  | otherwise =
+      pure (EventOther t)
+
+isValidCodePoint :: Int -> Bool
+isValidCodePoint cp = cp >= 0 && cp <= 0x10FFFF && (cp < 0xD800 || cp > 0xDFFF)
 
 -- | Current native window width and height in pixels.
 windowSize :: Window -> IO (Int, Int)
@@ -161,19 +175,17 @@ showMouse (Window win) visible = c_RGFW_window_showMouse win (if visible then 1 
 -- decodes to replacement characters.
 readClipboardText :: IO (Maybe Text)
 readClipboardText =
-  alloca $ \lenPtr -> do
+  alloca \lenPtr -> do
     ptr <- c_rgfw_read_clipboard_text lenPtr
     CSize len <- peek lenPtr
     if ptr == nullPtr || len == 0
       then pure Nothing
-      else do
-        txt <- decodeUtf8Lenient <$> unsafePackCStringLen (ptr, fromIntegral len)
-        pure (if T.null txt then Nothing else Just txt)
+      else mfilter (not . T.null) . Just . decodeUtf8Lenient <$> unsafePackCStringLen (ptr, fromIntegral len)
 
 -- | Replace the system clipboard with text (UTF-8); 'False' if refused.
 writeClipboardText :: Text -> IO Bool
 writeClipboardText txt =
-  TF.withCStringLen txt $ \(ptr, len) ->
+  TF.withCStringLen txt \(ptr, len) ->
     (/= 0) <$> c_rgfw_write_clipboard_text ptr (fromIntegral len)
 
 -- | Centre the window on its monitor.

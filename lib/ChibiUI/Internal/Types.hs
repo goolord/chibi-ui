@@ -38,14 +38,14 @@ data V2 = V2
   { v2X :: {-# UNPACK #-} !Float
   , v2Y :: {-# UNPACK #-} !Float
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | Width and height in logical pixels.
 data Size = Size
   { sizeW :: {-# UNPACK #-} !Float
   , sizeH :: {-# UNPACK #-} !Float
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | Top-left origin, width, and height in logical pixels. Hit tests include
 -- the left and top edges and exclude the right and bottom edges.
@@ -55,11 +55,12 @@ data Rect = Rect
   , rectW :: {-# UNPACK #-} !Float
   , rectH :: {-# UNPACK #-} !Float
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | Straight-alpha colour packed as @0xRRGGBBAA@, with 8 bits per channel.
 newtype Color = Color Word32
-  deriving (Eq, Show, Num)
+  deriving stock (Show)
+  deriving newtype (Eq, Num)
 
 -- | Pack red, green, blue, and alpha channels; alpha 0 is transparent, 255 opaque.
 {-# INLINE colorRGBA #-}

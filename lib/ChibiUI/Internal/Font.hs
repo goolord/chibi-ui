@@ -28,20 +28,21 @@ module ChibiUI.Internal.Font
 
 import Control.Monad (when)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Unsafe as BSU
+import Data.ByteString qualified as BS
+import Data.ByteString.Unsafe qualified as BSU
 import Data.FileEmbed (embedFileRelative)
+import Data.IORef
 import Data.Int (Int32)
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntMap.Strict as IM
-import Data.IORef
+import Data.IntMap.Strict qualified as IM
 import Data.Text (Text)
-import qualified Data.Text.Unsafe as TU
+import Data.Text.Unsafe qualified as TU
 import Data.Word (Word8, Word32)
 import Foreign.Marshal.Alloc (allocaBytes)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.IOArray (IOArray, newIOArray, unsafeReadIOArray, unsafeWriteIOArray)
+
 import ChibiUI.Internal.Draw (DrawArena, emitQuadUV, texAtlas)
 import ChibiUI.Internal.Types (Color, roundHalfUp, validScale)
 
@@ -324,6 +325,7 @@ data AtlasChange
   | AtlasFresh
   -- ^ A new atlas, after the font loaded or rebuilt at another scale:
     -- upload all of it.
+  deriving stock (Eq, Show)
 
 -- | Take what changed in the atlas since the last call, so the backend
 -- uploads just that.

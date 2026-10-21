@@ -22,6 +22,7 @@ module ChibiUI.Internal.Layout
   ) where
 
 import Data.Maybe (fromMaybe)
+
 import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectUnion)
 
 -- | How the next widget joins the current line.
@@ -34,7 +35,7 @@ data LineMode
   | Flowing
   -- ^ Beside the last widget, always: a @row@'s children flow rightward,
   -- so 'sameLine' there changes nothing.
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | Where the cursor is and what the next widget inherits.
 data LayoutState = LayoutState
@@ -59,12 +60,10 @@ data LayoutState = LayoutState
   -- ^ Width from the indentation to the right edge of this scope.
   , lsBottom :: {-# UNPACK #-} !Float
   -- ^ This scope's bottom edge, in window coordinates.
-  , lsBounded :: !Bool
-  -- ^ Whether 'lsBounds' holds an item placed in this scope.
-  , lsBounds :: {-# UNPACK #-} !Rect
+  , lsBounds :: !(Maybe Rect)
   -- ^ Bounds of all items placed in this scope, excluding trailing gaps.
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | Whether the line is open for more widgets beside the last.
 lineOpen :: LayoutState -> Bool
@@ -85,8 +84,7 @@ scopeAt mode x y w bottom =
     , lsNextH = Nothing
     , lsAvailW = max 0 w
     , lsBottom = bottom
-    , lsBounded = False
-    , lsBounds = Rect 0 0 0 0
+    , lsBounds = Nothing
     }
 
 -- | The cursor at the window's origin, stepping down.
@@ -95,7 +93,7 @@ freshLayout = scopeAt Stacked 0 0 0 0
 
 -- | Commands change the cursor without contributing widget bounds.
 data LayoutCommand = SameLine | Newline | NextWidth !Float | NextHeight !Float | Space !Float
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 stepLayout :: Float -> LayoutCommand -> LayoutState -> LayoutState
 stepLayout gap command ls = case command of
@@ -112,26 +110,30 @@ stepLayout gap command ls = case command of
     }
   NextWidth w -> ls {lsNextW = Just w}
   NextHeight h -> ls {lsNextH = Just h}
-  Space n | lineOpen ls -> ls {lsPenX = lsPenX ls + n}
-          | otherwise -> ls {lsLineY = lsLineY ls + n}
-  where r = lsLast ls
+  Space n
+    | lineOpen ls -> ls {lsPenX = lsPenX ls + n}
+    | otherwise -> ls {lsLineY = lsLineY ls + n}
+  where
+    r = lsLast ls
 
 -- | Consume size overrides once, accumulate bounds, and advance past the item.
 placeLayout :: Float -> Size -> LayoutState -> (Rect, LayoutState)
-placeLayout gap sz ls = (r, ls
-  { lsPenX = case lsMode ls of
-      Flowing -> rectX r + w + gap
-      JoinOnce -> lsIndent ls
-      Stacked -> lsPenX ls
-  , lsLineY = if flowing then rectY r else rectY r + lineH + gap
-  , lsMode = if flowing then Flowing else Stacked
-  , lsLineH = lineH
-  , lsLast = r
-  , lsNextW = Nothing
-  , lsNextH = Nothing
-  , lsBounded = True
-  , lsBounds = if lsBounded ls then rectUnion r (lsBounds ls) else r
-  })
+placeLayout gap sz ls =
+  ( r
+  , ls
+      { lsPenX = case lsMode ls of
+          Flowing -> rectX r + w + gap
+          JoinOnce -> lsIndent ls
+          Stacked -> lsPenX ls
+      , lsLineY = if flowing then rectY r else rectY r + lineH + gap
+      , lsMode = if flowing then Flowing else Stacked
+      , lsLineH = lineH
+      , lsLast = r
+      , lsNextW = Nothing
+      , lsNextH = Nothing
+      , lsBounds = Just (maybe r (rectUnion r) (lsBounds ls))
+      }
+  )
   where
     w = max 0 (fromMaybe (sizeW sz) (lsNextW ls))
     h = max 0 (fromMaybe (sizeH sz) (lsNextH ls))
@@ -151,9 +153,9 @@ remainingHeight :: LayoutState -> Float
 remainingHeight ls = max 0 (lsBottom ls - lsLineY ls)
 
 -- | A group measures its children independently, then occupies one parent item.
-beginGroup :: Bool -> LayoutState -> LayoutState
-beginGroup horizontal ls =
-  scopeAt (if horizontal then Flowing else Stacked) (lsPenX ls) (lsLineY ls)
+beginGroup :: LineMode -> LayoutState -> LayoutState
+beginGroup mode ls =
+  scopeAt mode (lsPenX ls) (lsLineY ls)
     (nextOrRemainingWidth ls)
     (maybe (lsBottom ls) (lsLineY ls +) (lsNextH ls))
 
@@ -164,11 +166,9 @@ endGroup parent child = (contentSize (V2 (lsPenX parent) (lsLineY parent)) child
 
 -- | Extent from a scope's origin, excluding trailing cursor spacing.
 contentSize :: V2 -> LayoutState -> Size
-contentSize (V2 x y) child
-  | not (lsBounded child) = Size 0 0
-  | otherwise =
-      let b = lsBounds child
-       in Size (max 0 (rectX b + rectW b - x)) (max 0 (rectY b + rectH b - y))
+contentSize (V2 x y) child = case lsBounds child of
+  Nothing -> Size 0 0
+  Just (Rect bx by bw bh) -> Size (max 0 (bx + bw - x)) (max 0 (by + bh - y))
 
 -- | Lay out scrolling content in its own shifted, vertical coordinate
 -- space. Its bottom is one viewport below its top.

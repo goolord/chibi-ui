@@ -35,10 +35,12 @@ module ChibiUI.Internal.Input
 
 import Control.Monad (unless, when)
 import Data.Bits (Bits, clearBit, setBit, testBit, zeroBits, (.&.))
+import Data.Foldable (find)
 import Data.IORef (IORef, readIORef, writeIORef)
-import Data.List (find)
+import Data.Text (Text)
 import Data.Word (Word32)
 import System.Info (os)
+
 import ChibiUI.Internal.Types (Size (..), V2 (..))
 
 -- | A key on the keyboard. A key that types a character is 'KeyChar' of the
@@ -64,7 +66,7 @@ data Key
   | KeySpace
   | KeyF !Int
   | KeyChar !Char
-  deriving (Eq, Ord, Show)
+  deriving stock (Eq, Ord, Show)
 
 -- | Modifier keys held while the frame's input is processed.
 data Modifiers = Modifiers
@@ -73,7 +75,7 @@ data Modifiers = Modifiers
   , modAlt :: !Bool
   , modSuper :: !Bool
   }
-  deriving (Eq, Ord, Show)
+  deriving stock (Eq, Ord, Show)
 
 -- | No modifier held.
 noModifiers :: Modifiers
@@ -108,7 +110,7 @@ data Input = Input
   -- ^ Keys pressed this frame in event order, auto-repeats included.
   , inputKeysReleased :: [Key]
   , inputKeysHeld :: [Key]
-  , inputChars :: [Char]
+  , inputChars :: !Text
   -- ^ Typed text this frame, in event order.
   , inputModifiers :: !Modifiers
   , inputWindowSize :: {-# UNPACK #-} !Size
@@ -117,7 +119,7 @@ data Input = Input
   -- caret only then.
   , inputDeltaTime :: {-# UNPACK #-} !Float
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | A key or mouse button: whether it went down this frame, came up, or is
 -- held.
@@ -166,7 +168,7 @@ emptyInput =
     , inputKeys = []
     , inputKeysReleased = []
     , inputKeysHeld = []
-    , inputChars = []
+    , inputChars = ""
     , inputModifiers = noModifiers
     , inputWindowSize = Size 800 600
     , inputWindowFocused = True
@@ -180,7 +182,7 @@ data UiCursorKind
   | UiCursorPointer
   | UiCursorText
   | UiCursorHidden
-  deriving (Eq, Show, Enum, Bounded)
+  deriving stock (Eq, Show, Enum, Bounded)
 
 -- | Show the platform cursor for a kind when it differs from the kind last
 -- shown, which @ref@ holds. 'UiCursorHidden' hides the pointer through
@@ -189,7 +191,7 @@ data UiCursorKind
 syncCursorKind :: IORef UiCursorKind -> (Bool -> IO ()) -> (UiCursorKind -> IO ()) -> UiCursorKind -> IO ()
 syncCursorKind ref setVisible setShape want = do
   cur <- readIORef ref
-  when (want /= cur) $ do
+  when (want /= cur) do
     writeIORef ref want
     let hidden = want == UiCursorHidden
     when (hidden /= (cur == UiCursorHidden)) (setVisible (not hidden))
@@ -204,7 +206,7 @@ clearEphemeral inp =
     , inputButtonsReleased = noButtons
     , inputKeys = []
     , inputKeysReleased = []
-    , inputChars = []
+    , inputChars = ""
     , inputScroll = V2 0 0
     }
 
@@ -253,7 +255,7 @@ data MouseButton
   | MouseBack
   | MouseForward
   | MouseOther !Int
-  deriving (Eq, Ord, Show)
+  deriving stock (Eq, Ord, Show)
 
 -- | The button for a 1-based platform button number.
 mouseButtonNumber :: Int -> MouseButton
@@ -280,7 +282,7 @@ buttonBit = \case
 
 -- | A set of mouse buttons, as held, pressed or released in an 'Input'.
 newtype MouseButtons = MouseButtons Word32
-  deriving (Eq)
+  deriving newtype (Eq)
 
 instance Show MouseButtons where
   showsPrec d bs = showParen (d > 10) (showString "buttonsFromList " . showsPrec 11 (buttonsToList bs))

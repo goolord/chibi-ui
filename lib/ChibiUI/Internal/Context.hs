@@ -1,5 +1,4 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 -- | The context: the state that outlives a frame. One per window; the
 -- backend creates it, folds each frame's events into its input, runs the
@@ -8,6 +7,7 @@ module ChibiUI.Internal.Context
   ( Context (..)
   , ModelAccess (..)
   , ImageEntry (..)
+  , MenuItem (..)
   , Popup (..)
   , ScrollTarget (..)
   , Wake (..)
@@ -21,11 +21,12 @@ module ChibiUI.Internal.Context
   , frameRects
   ) where
 
-import Data.IntMap.Strict (IntMap)
+import Data.ByteString qualified as BS
 import Data.IORef
-import qualified Data.ByteString as BS
+import Data.IntMap.Strict (IntMap)
 import Data.Text (Text)
 import Data.Word (Word64)
+
 import ChibiUI.Internal.Draw (DrawArena, newDrawArena)
 import ChibiUI.Internal.Font (Font, embeddedFont, fontScale, fontSetScale, newFont)
 import ChibiUI.Internal.Id (WidgetId (..), initialIdPath)
@@ -39,13 +40,27 @@ import ChibiUI.Internal.Types (Rect, V2)
 -- | A region the wheel can scroll, as a frame left it: its id, the part
 -- of it showing through the clip, its scroll offset, and the furthest
 -- offset it can reach.
-data ScrollTarget = ScrollTarget !WidgetId !Rect !V2 !V2
+data ScrollTarget = ScrollTarget
+  { stWidget :: !WidgetId
+  , stShown :: !Rect
+  , stOffset :: !V2
+  , stMaxOffset :: !V2
+  }
+
+-- | One entry in a popup menu: its caption, whether it can be chosen,
+-- and the action it runs when chosen.
+data MenuItem a = MenuItem
+  { miTitle :: !Text
+  , miEnabled :: !Bool
+  , miAction :: a
+  }
+  deriving stock (Functor)
 
 -- | One lightweight overlay. Actions run before the next view invocation.
 data Popup = Popup
   { popupOwner :: !WidgetId
   , popupPosition :: !V2
-  , popupItems :: ![(Text, Bool, IO ())]
+  , popupItems :: ![MenuItem (IO ())]
   , popupSelected :: !Int
   , popupPointer :: !V2
   }
@@ -129,7 +144,7 @@ data Wake
   -- ^ Once 'ctxTime' reaches this time.
   | WakeIdle
   -- ^ Not until input arrives.
-  deriving (Eq, Ord, Show)
+  deriving stock (Eq, Ord, Show)
 
 -- | Live model operations. Projections compose these rather than copying a
 -- model into a temporary reference, so deferred actions see current state.
@@ -201,9 +216,9 @@ setFont ctx font = do
 
 -- | Install the platform clipboard.
 withClipboard :: Context model -> IO (Maybe Text) -> (Text -> IO ()) -> IO ()
-withClipboard ctx get put = do
-  writeIORef (ctxClipboardGet ctx) get
-  writeIORef (ctxClipboardPut ctx) put
+withClipboard ctx getClip putClip = do
+  writeIORef (ctxClipboardGet ctx) getClip
+  writeIORef (ctxClipboardPut ctx) putClip
 
 contextInput :: Context model -> IO Input
 contextInput = readIORef . ctxInput

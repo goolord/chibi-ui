@@ -6,21 +6,20 @@ module ChibiUI.Internal.Frame
 
 import Control.Monad (unless, when)
 import Data.IORef
-import Data.List (elemIndex)
-import Data.Foldable (minimumBy)
+import Data.List (elemIndex, (!?))
 import Data.Maybe (fromMaybe)
-import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
+
 import ChibiUI.Internal.Context (Context (..), ScrollTarget (..), Wake (..), noWidget)
 import ChibiUI.Internal.Draw
 import ChibiUI.Internal.Id (WidgetId, initialIdPath)
 import ChibiUI.Internal.Input
-import ChibiUI.Internal.Monad
-import ChibiUI.Internal.Menu (processPopup, paintPopup, paintTooltip)
 import ChibiUI.Internal.Layout (beginViewport)
+import ChibiUI.Internal.Menu (paintPopup, paintTooltip, processPopup)
+import ChibiUI.Internal.Monad
 import ChibiUI.Internal.RectTable (clearRectTable)
 import ChibiUI.Internal.Style (themeWindowPad)
-import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectHit, rectInflate)
+import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectArea, rectHit, rectInflate)
 
 -- | Run one frame: reset the frame state, run the view, then resolve focus
 -- (Tab, click-to-unfocus) and snapshot the draw list. The window
@@ -82,9 +81,10 @@ runFrame ctx inp view = do
 -- hands the wheel to the one around it. A nested region shows through its
 -- parent's clip, so the innermost under the pointer is the smallest.
 wheelOwner :: Input -> [ScrollTarget] -> WidgetId
-wheelOwner inp targets = case [(rectW s * rectH s, wid) | ScrollTarget wid s o m <- targets, takes s o m] of
-  [] -> noWidget
-  takers -> snd (minimumBy (comparing fst) takers)
+wheelOwner inp targets =
+  case [(rectArea s, wid) | ScrollTarget wid s o m <- targets, takes s o m] of
+    [] -> noWidget
+    t0 : ts -> snd $ foldl' (\a b -> if fst b < fst a then b else a) t0 ts
   where
     V2 dx dy = inputScroll inp
     takes shown (V2 x y) (V2 maxX maxY) =
@@ -95,8 +95,12 @@ wheelOwner inp targets = case [(rectW s * rectH s, wid) | ScrollTarget wid s o m
 resolveFocus :: Input -> Bool -> Bool -> [WidgetId] -> WidgetId -> WidgetId
 resolveFocus inp blocked requested fs focus
   | not blocked && not requested && pressedIn MouseLeft inp = noWidget
-  | not blocked && pressedIn KeyTab inp && not (null fs) =
-      fs !! ((fromMaybe start (elemIndex focus fs) + direction) `mod` length fs)
+  | not blocked
+  , pressedIn KeyTab inp
+  , not (null fs)
+  , let idx = (fromMaybe start (elemIndex focus fs) + direction) `mod` length fs
+  , Just next <- fs !? idx =
+      next
   | focus `elem` fs = focus
   | otherwise = noWidget
   where

@@ -1,5 +1,4 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# OPTIONS_GHC -Wno-name-shadowing #-}
 
 -- | The draw list: widgets emit quads into a growable vertex buffer,
 -- batched into commands that share a texture. Every quad is cut to the
@@ -74,7 +73,7 @@ data DrawCmd = DrawCmd
   , cmdFirstQuad :: {-# UNPACK #-} !Word32
   , cmdQuadCount :: {-# UNPACK #-} !Word32
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | One frame's geometry and batches. The vertex pointer refers to
 -- reusable arena storage: render or copy it before running another frame
@@ -209,10 +208,9 @@ clipIntersect a b = fromMaybe (Rect 0 0 0 0) (rectIntersect a b)
 
 -- | Restore the clip pushed last.
 popClip :: DrawArena -> IO ()
-popClip a = do
-  stack <- readIORef (daClipStack a)
-  case stack of
-    (r : rest) -> do
+popClip a =
+  readIORef (daClipStack a) >>= \case
+    r : rest -> do
       writeIORef (daClipStack a) rest
       writeIORef (daLastClip a) r
     [] -> pure ()
@@ -226,22 +224,23 @@ emitQuadUV a !tex !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
   Rect cx0 cy0 cw ch <- readIORef (daLastClip a)
   let !cx1 = cx0 + cw
       !cy1 = cy0 + ch
-  if x1 <= x0 || y1 <= y0 || cx1 <= cx0 || cy1 <= cy0
-      || x0 >= cx1 || x1 <= cx0 || y0 >= cy1 || y1 <= cy0
-    then pure ()
-    else
-      if x0 >= cx0 && y0 >= cy0 && x1 <= cx1 && y1 <= cy1
-        -- Inside the clip, the usual case: nothing to cut.
-        then appendQuad a tex x0 y0 x1 y1 col u0 v0 u1 v1
-        else do
-          -- Cut the quad to the clip, sliding the UVs with the edges.
-          let !nx0 = max x0 cx0
-              !ny0 = max y0 cy0
-              !nx1 = min x1 cx1
-              !ny1 = min y1 cy1
-              ux x = u0 + (u1 - u0) * ((x - x0) / (x1 - x0))
-              uy y = v0 + (v1 - v0) * ((y - y0) / (y1 - y0))
-          appendQuad a tex nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
+      disjoint =
+        x1 <= x0 || y1 <= y0 || cx1 <= cx0 || cy1 <= cy0
+          || x0 >= cx1 || x1 <= cx0 || y0 >= cy1 || y1 <= cy0
+      unclipped = x0 >= cx0 && y0 >= cy0 && x1 <= cx1 && y1 <= cy1
+  if
+    | disjoint -> pure ()
+    -- Inside the clip, the usual case: nothing to cut.
+    | unclipped -> appendQuad a tex x0 y0 x1 y1 col u0 v0 u1 v1
+    | otherwise ->
+        -- Cut the quad to the clip, sliding the UVs with the edges.
+        let !nx0 = max x0 cx0
+            !ny0 = max y0 cy0
+            !nx1 = min x1 cx1
+            !ny1 = min y1 cy1
+            ux x = u0 + (u1 - u0) * ((x - x0) / (x1 - x0))
+            uy y = v0 + (v1 - v0) * ((y - y0) / (y1 - y0))
+         in appendQuad a tex nx0 ny0 nx1 ny1 col (ux nx0) (uy ny0) (ux nx1) (uy ny1)
 
 -- | Write a quad after the arena's last, growing the buffer when needed,
 -- and batch it.
@@ -297,7 +296,7 @@ batchQuads a !texture !q !k = do
 writeQuadVertices :: Ptr Word8 -> Int -> Float -> Float -> Float -> Float -> Color -> Float -> Float -> Float -> Float -> IO ()
 writeQuadVertices !buf !n !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
   let !base = buf `plusPtr` (n * vertexSize)
-      !(r, g, b, a) = colorFloats col
+      !(r, g, b, alpha) = colorFloats col
       put !i !x !y !u !v = do
         let !p = base `plusPtr` (i * vertexSize)
         pokeByteOff p 0 x
@@ -305,7 +304,7 @@ writeQuadVertices !buf !n !x0 !y0 !x1 !y1 col !u0 !v0 !u1 !v1 = do
         pokeByteOff p 8 (r :: Float)
         pokeByteOff p 12 (g :: Float)
         pokeByteOff p 16 (b :: Float)
-        pokeByteOff p 20 (a :: Float)
+        pokeByteOff p 20 (alpha :: Float)
         pokeByteOff p 24 (u :: Float)
         pokeByteOff p 28 (v :: Float)
   put 0 x0 y0 u0 v0

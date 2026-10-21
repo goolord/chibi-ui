@@ -1,20 +1,43 @@
 -- | Small command-based text editor shared by fields and text areas.
 -- Character offsets, selection and bounded snapshots; no document tree.
 module ChibiUI.Internal.Editor
-  ( Editor (..), EditState (..), Command (..), Motion (..)
-  , newEditor, editorText, selection, selectedText, select, selectWord, replace, command, inputCommands
-  , textLines, caretRowLine, sanitizeText
+  ( Editor (..)
+  , EditState (..)
+  , Command (..)
+  , Motion (..)
+  , newEditor
+  , editorText
+  , selection
+  , selectedText
+  , select
+  , selectWord
+  , replace
+  , command
+  , inputCommands
+  , textLines
+  , caretRowLine
+  , atClamped
+  , sanitizeText
   ) where
 
 import Data.Char (isAlphaNum, isPrint, isSpace)
+import Data.List ((!?))
+import Data.List.NonEmpty (NonEmpty (..))
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
-import qualified Data.Text as T
-import qualified Data.Text.Unsafe as TU
+import Data.Text qualified as T
+import Data.Text.Unsafe qualified as TU
+import Data.Traversable (mapAccumL)
+
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Types (clamp)
 
-data EditState = EditState {editText :: !Text, editCaret :: !Int, editAnchor :: !Int}
-  deriving (Eq, Show)
+data EditState = EditState
+  { editText :: !Text
+  , editCaret :: !Int
+  , editAnchor :: !Int
+  }
+  deriving stock (Eq, Show)
 
 -- | Each undo step keeps the whole text (a 'Text' edit copies), so a
 -- history entry also carries its byte size, cached when the entry is
@@ -26,24 +49,61 @@ data Editor = Editor
   { editState :: !EditState
   , editUndo :: ![HistoryEntry]
   , editRedo :: ![HistoryEntry]
-  } deriving (Eq, Show)
+  }
+  deriving stock (Eq, Show)
 
-data Motion = Backward | Forward | WordBackward | WordForward | Start | End
-  | LineStart | LineEnd | PreviousLine | NextLine
-  deriving (Eq, Show)
+data Motion
+  = Backward
+  | Forward
+  | WordBackward
+  | WordForward
+  | Start
+  | End
+  | LineStart
+  | LineEnd
+  | PreviousLine
+  | NextLine
+  deriving stock (Eq, Show)
 
-data Command = Insert !Text | Move !Motion !Bool | Delete !Motion
-  | SelectAll | Copy | Cut | Paste | Undo | Redo
-  deriving (Eq, Show)
+data Command
+  = Insert !Text
+  | Move !Motion !Bool
+  | Delete !Motion
+  | SelectAll
+  | Copy
+  | Cut
+  | Paste
+  | Undo
+  | Redo
+  deriving stock (Eq, Show)
+
+-- | Selection and word motion agree on whitespace, identifiers and punctuation.
+data WordCategory = CatSpace | CatWord | CatPunct
+  deriving stock (Eq, Show)
+
+wordCategory :: Char -> WordCategory
+wordCategory c
+  | isSpace c = CatSpace
+  | isAlphaNum c || c == '_' = CatWord
+  | otherwise = CatPunct
+
+sameCategory :: Char -> Char -> Bool
+sameCategory a b = wordCategory a == wordCategory b
 
 newEditor :: Text -> Editor
-newEditor t = Editor (EditState t (T.length t) (T.length t)) [] []
+newEditor t = Editor (EditState t len len) [] []
+  where
+    len = T.length t
 
 selection :: Editor -> (Int, Int)
-selection ed = let EditState _ c a = editState ed in (min c a, max c a)
+selection ed =
+  let EditState _ c a = editState ed
+   in (min c a, max c a)
 
 selectedText :: Editor -> Text
-selectedText ed = let (a, b) = selection ed in T.take (b - a) (T.drop a (editorText ed))
+selectedText ed =
+  let (a, b) = selection ed
+   in T.take (b - a) (T.drop a (editorText ed))
 
 select :: Int -> Int -> Editor -> Editor
 select a c ed = ed {editState = s {editCaret = limit c, editAnchor = limit a}}
@@ -54,19 +114,15 @@ select a c ed = ed {editState = s {editCaret = limit c, editAnchor = limit a}}
 selectWord :: Int -> Editor -> Editor
 selectWord index ed
   | T.null t = ed
-  | otherwise = select (i - T.length (T.takeWhileEnd same (T.take i t)))
-      (i + T.length (T.takeWhile same (T.drop i t))) ed
+  | otherwise =
+      select
+        (i - T.length (T.takeWhileEnd same (T.take i t)))
+        (i + T.length (T.takeWhile same (T.drop i t)))
+        ed
   where
     t = editorText ed
     i = clamp 0 (T.length t - 1) index
-    same c = wordCategory c == wordCategory (T.index t i)
-
--- Selection and word motion agree on whitespace, identifiers and punctuation.
-wordCategory :: Char -> Int
-wordCategory c
-  | isSpace c = 0
-  | isAlphaNum c || c == '_' = 1
-  | otherwise = 2
+    same = sameCategory (T.index t i)
 
 -- | The editor's text.
 editorText :: Editor -> Text
@@ -95,8 +151,9 @@ replaceFrom s0 raw ed
 -- lazy takes cannot retain older history.
 remember :: EditState -> [HistoryEntry] -> [HistoryEntry]
 remember s history =
-  let kept = take undoDepth (entryOf s : history)
-      retained = scanl (+) (snd (entryOf s)) (map snd history)
+  let entry@(_, sz) = entryOf s
+      kept = take undoDepth (entry : history)
+      retained = scanl (+) sz (map snd history)
       withinBudget = [e | (c, e) <- zip retained kept, c <= undoBudget]
    in length withinBudget `seq` withinBudget
 
@@ -113,16 +170,23 @@ undoBudget :: Int
 undoBudget = 262144
 
 -- | Logical lines with character offsets, including a trailing empty line.
-textLines :: Text -> [(Int, Text)]
-textLines t = zip (scanl (\n line -> n + T.length line + 1) 0 ls) ls
-  where ls = T.splitOn "\n" t
+textLines :: Text -> NonEmpty (Int, Text)
+textLines t = snd $ mapAccumL (\ !n line -> (n + T.length line + 1, (n, line))) 0 (splitLines t)
+  where
+    splitLines s = case T.splitOn "\n" s of
+      x : xs -> x :| xs
+      [] -> "" :| []
 
 -- | The caret's row among 'textLines' and that line, as
 -- @(row, (start, line))@.
-caretRowLine :: [(Int, Text)] -> Int -> (Int, (Int, Text))
-caretRowLine ls c =
-  let before = takeWhile ((<= max 0 c) . fst) ls
-   in (length before - 1, last before)
+caretRowLine :: NonEmpty (Int, Text) -> Int -> (Int, (Int, Text))
+caretRowLine (l0 :| rest) c =
+  let (before, _) = span ((<= max 0 c) . fst) rest
+   in (length before, foldl' (const id) l0 before)
+
+-- | Total clamped indexing into a non-empty list.
+atClamped :: NonEmpty a -> Int -> a
+atClamped (x0 :| xs) idx = fromMaybe x0 ((x0 : xs) !? clamp 0 (length xs) idx)
 
 -- | Fields discard controls; text areas retain LF and expand pasted tabs.
 -- Clean text, the usual case, comes back as is after one scan.
@@ -143,8 +207,20 @@ target motion (EditState t c _) = case motion of
   Forward -> min (T.length t) (c + 1)
   Start -> 0
   End -> T.length t
-  WordBackward -> c - wordLength (reverse (T.unpack (T.take c t)))
-  WordForward -> c + wordLength (T.unpack (T.drop c t))
+  WordBackward ->
+    let before = T.take c t
+        rest = T.dropWhileEnd isSpace before
+        word = case T.unsnoc rest of
+          Nothing -> T.empty
+          Just (_, x) -> T.takeWhileEnd (sameCategory x) rest
+     in T.length rest - T.length word
+  WordForward ->
+    let after = T.drop c t
+        rest = T.dropWhile isSpace after
+        word = case T.uncons rest of
+          Nothing -> T.empty
+          Just (x, _) -> T.takeWhile (sameCategory x) rest
+     in c + (T.length after - T.length rest) + T.length word
   LineStart -> start
   LineEnd -> start + T.length line
   PreviousLine -> vertical (-1)
@@ -153,13 +229,8 @@ target motion (EditState t c _) = case motion of
     ls = textLines t
     (row, (start, line)) = caretRowLine ls c
     vertical delta =
-      let (offset, destination) = ls !! clamp 0 (length ls - 1) (row + delta)
+      let (offset, destination) = atClamped ls (row + delta)
        in offset + min (c - start) (T.length destination)
-    wordLength xs =
-      let (spaces, rest) = span isSpace xs
-       in length spaces + case rest of
-            [] -> 0
-            x : _ -> length (takeWhile ((== wordCategory x) . wordCategory) rest)
 
 -- | Clipboard commands are handled by the widget, then use 'Insert'/'Delete'.
 command :: Command -> Editor -> Editor
@@ -167,7 +238,8 @@ command cmd ed = case cmd of
   Insert t -> replace t ed
   SelectAll -> select 0 (T.length (editText s)) ed
   Move m extend ->
-    let c | not extend && a /= b && m == Backward = a
+    let c
+          | not extend && a /= b && m == Backward = a
           | not extend && a /= b && m == Forward = b
           | otherwise = target m s
      in select (if extend then editAnchor s else c) c ed
@@ -178,7 +250,9 @@ command cmd ed = case cmd of
   Redo -> case editRedo ed of
     (x, _) : xs -> Editor x (entryOf s : editUndo ed) xs
     [] -> ed
-  _ -> ed
+  Copy -> ed
+  Cut -> ed
+  Paste -> ed
   where
     s = editState ed
     (a, b) = selection ed
@@ -196,7 +270,7 @@ inputCommands multiline inp = concatMap binding (inputKeys inp) ++ typing
     lineEnd = if multiline then LineEnd else End
     left = if macCommand then lineStart else if jump then WordBackward else Backward
     right = if macCommand then lineEnd else if jump then WordForward else Forward
-    binding k = case k of
+    binding = \case
       KeyChar 'a' | primary -> [SelectAll]
       KeyChar 'c' | primary -> [Copy]
       KeyChar 'x' | primary -> [Cut]
@@ -213,7 +287,7 @@ inputCommands multiline inp = concatMap binding (inputKeys inp) ++ typing
       KeyBackspace -> [Delete left]
       KeyDelete -> [Delete right]
       _ -> []
-    text = sanitizeText multiline (T.pack (inputChars inp))
+    text = sanitizeText multiline (inputChars inp)
     -- Option-composed characters and Windows AltGr are text, not app chords.
     textModifiers = not (modSuper mods) && (not (modCtrl mods) || modAlt mods)
     typing = [Insert text | not (T.null text), textModifiers]

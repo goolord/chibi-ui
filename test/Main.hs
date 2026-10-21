@@ -8,17 +8,19 @@ module Main (main) where
 import Control.Concurrent (threadDelay)
 import Control.Monad (filterM)
 import Data.IORef
-import Data.List (nub, sortOn)
+import Data.List (nub, sortOn, (!?))
+import Data.Maybe (listToMaybe)
+import Data.Text qualified as T
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable (peekByteOff)
-import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Lens.Micro (_1, _2, (%~))
 import System.Info (os)
+
 import ChibiUI
 import ChibiUI.Backend
-import qualified ChibiUI.Labels as Labels
+import ChibiUI.Labels qualified as Labels
 
 main :: IO ()
 main = do
@@ -101,7 +103,7 @@ pressLeft = applyMouseButton MouseLeft True
 releaseLeft = applyMouseButton MouseLeft False
 
 typeText :: Text -> Input -> Input
-typeText t inp = inp {inputChars = inputChars inp ++ T.unpack t}
+typeText t inp = inp {inputChars = inputChars inp <> t}
 
 -- | The frame's recorded rects, sorted by x.
 readRects :: Context model -> IO [Rect]
@@ -112,12 +114,17 @@ readRects ctx = do
 -- | The tallest recorded rect: in these tests, the interactive widget the
 -- test wants to click.
 bigRect :: [Rect] -> IO Rect
-bigRect rs = case rs of
+bigRect = \case
   [] -> fail "no widget rects recorded"
-  _ -> pure (foldr1 (\a b -> if rectH a >= rectH b then a else b) rs)
+  r : rs -> pure (foldl' (\a b -> if rectH a >= rectH b then a else b) r rs)
+
+lastRect :: [Rect] -> IO Rect
+lastRect rs = case reverse rs of
+  r : _ -> pure r
+  [] -> fail "no widget rects recorded"
 
 data Model = Model {modelCount :: Int, modelText :: Text}
-  deriving (Eq, Generic, Show)
+  deriving stock (Eq, Generic, Show)
 
 testCounter :: IO ()
 testCounter = do
@@ -362,13 +369,13 @@ testTextAreaViewport = do
   _ <- frame ctx (at 14 16 . pressLeft) view
   _ <- frame ctx releaseLeft view
   edited <- frame ctx (typeText "X") view
-  assert "textarea: wheel offset was lost during pointer hit-testing" (T.lines edited !! 3 == "Xrow3")
+  assert "textarea: wheel offset was lost during pointer hit-testing" (T.lines edited !? 3 == Just "Xrow3")
   render (chord primaryMods [KeyEnd])
   -- End reveals the last line; insertion at the viewport bottom must hit it.
   _ <- frame ctx (at 14 40 . pressLeft . chord noModifiers []) view
   _ <- frame ctx releaseLeft view
   lastLine <- frame ctx (typeText "Y") view
-  assert "textarea: caret did not scroll last line into view" (last (T.lines lastLine) == "Yrow19")
+  assert "textarea: caret did not scroll last line into view" (listToMaybe (reverse (T.lines lastLine)) == Just "Yrow19")
   render (chord primaryMods [KeyChar 'a'])
   render (chord primaryMods [KeyHome])
   (_, tiny) <- runFrame ctx emptyInput (nextWidth 2 >> nextHeight 2 >> textArea source)
@@ -506,7 +513,8 @@ testRadio = do
   rs <- readRects ctx
   assert ("radio: expected three options in a row: " ++ show rs)
     (length rs == 3 && length (nub (map rectY rs)) == 1)
-  chosen <- clickIn ctx (last rs) view
+  rLast <- lastRect rs
+  chosen <- clickIn ctx rLast view
   kept <- frame ctx id view
   assert "radio: click did not choose the option" (chosen == 'c' && kept == 'c')
 
@@ -541,7 +549,8 @@ testTabs = do
         pure v
   _ <- frame ctx id view
   rs <- readRects ctx
-  selected <- clickIn ctx (last rs) view
+  rLast <- lastRect rs
+  selected <- clickIn ctx rLast view
   kept <- frame ctx id view
   assert "tabs: click did not select the tab" (length rs == 3 && selected == 2 && kept == 2)
 
@@ -561,8 +570,8 @@ testLastItem = do
   (_, over, _, _) <- frame ctx (at (rectX r + 2) (rectY r + 2)) view
   assert "last item: hover wrong for the first button" (not idle && over)
   rs <- readRects ctx
-  let b = last rs
-      onB = at (rectX b + 2) (rectY b + 2)
+  b <- lastRect rs
+  let onB = at (rectX b + 2) (rectY b + 2)
   (_, _, focusedPress, activePress) <- frame ctx (onB . pressLeft) view
   _ <- frame ctx (onB . releaseLeft) view
   (_, _, focusedAfter, activeAfter) <- frame ctx id view
@@ -647,7 +656,7 @@ testFillWidth = do
   _ <- frame ctx id (labeled "caption" (fillWidth >> textInput "value"))
   rs <- readRects ctx
   pad <- themeWindowPad <$> runChibiUI ctx theme
-  let field = last rs
+  field <- lastRect rs
   assert ("fillWidth: field does not reach the edge: " ++ show rs)
     (rectX field + rectW field == 800 - pad)
 
@@ -660,9 +669,9 @@ testPanel = do
   rs <- readRects ctx
   th <- runChibiUI ctx theme
   let gap = themeGap th
-      left = minimum (map rectX rs)
-      top = minimum (map rectY rs)
-      bottom = maximum (map (\r -> rectY r + rectH r) rs)
+      left = foldl' min 1e9 (map rectX rs)
+      top = foldl' min 1e9 (map rectY rs)
+      bottom = foldl' max 0 (map (\r -> rectY r + rectH r) rs)
   assert ("panel: padding or width wrong: " ++ show (outer, rs))
     (rectW outer == 800 - themeWindowPad th * 2
       && left - rectX outer == gap && top - rectY outer == gap
@@ -802,14 +811,14 @@ testScroll = do
       childTops = do
         rs <- readRects ctx
         -- The region is the tallest rect; the labels are the rest.
-        let r = foldr1 (\a b -> if rectH a >= rectH b then a else b) rs
-        pure (minimum (map rectY [r2 | r2 <- rs, r2 /= r]))
+        r <- bigRect rs
+        pure (foldl' min 1e9 (map rectY [r2 | r2 <- rs, r2 /= r]))
   _ <- frame ctx id view
   top0 <- childTops
   -- Wheel down over the region: the body moves in the input frame.
   rs <- readRects ctx
-  let r = foldr1 (\a b -> if rectH a >= rectH b then a else b) rs
-      cx = rectX r + rectW r / 2
+  r <- bigRect rs
+  let cx = rectX r + rectW r / 2
       cy = rectY r + 10
       step = 3 * 16 -- three line heights
   _ <- frame ctx (\i -> (at cx cy i) {inputScroll = V2 0 1}) view
@@ -928,7 +937,7 @@ testDrawData = do
   -- draws each through its fixed index buffer, so a gap or overlap would
   -- skip or double-draw quads with every count still looking right.
   let tiles = [(fromIntegral (cmdFirstQuad c), fromIntegral (cmdQuadCount c)) | c <- drawCommands dd] :: [(Int, Int)]
-  unless (map fst tiles == scanl (+) 0 (map snd (init tiles)) && sum (map snd tiles) == drawVertexCount dd `div` 4) $
+  unless (map fst tiles == zipWith const (scanl (+) 0 (map snd tiles)) tiles && sum (map snd tiles) == drawVertexCount dd `div` 4) $
     fail ("draw data: commands do not tile the quads " ++ show tiles)
   -- The first glyph's quad starts at the label's origin, within a glyph's
   -- bearings: the pen is at the content origin and the raster is the font's.
@@ -1479,7 +1488,7 @@ testTextAlignment = do
   let glyphY align = do
         (_, dd) <- runFrame ctx emptyInput (withTextAlign align (nextHeight 53 >> label "align"))
         points <- glyphVertices dd
-        pure (minimum (map snd points))
+        pure (foldl' min 1e9 (map snd points))
   top <- glyphY AlignTop
   middle <- glyphY AlignMiddle
   bottom <- glyphY AlignBottom

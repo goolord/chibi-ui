@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE UnboxedTuples #-}
 
@@ -18,10 +17,12 @@ module ChibiUI.Internal.RectTable
   , rectTableToList
   ) where
 
-import Control.Monad (forM, forM_, when)
+import Control.Monad (when)
 import Data.Bits ((.&.))
+import Data.Foldable (for_)
 import Data.IORef
 import Data.Maybe (catMaybes)
+import Data.Traversable (for)
 import GHC.Exts
   ( Float (..)
   , Int (..)
@@ -34,11 +35,12 @@ import GHC.Exts
   , setByteArray#
   , writeFloatArray#
   , writeIntArray#
-  , (==#)
-  , (+#)
   , (*#)
+  , (+#)
+  , (==#)
   )
 import GHC.IO (IO (IO))
+
 import ChibiUI.Internal.Types (Rect (..))
 import ChibiUI.Internal.URef
 
@@ -102,7 +104,7 @@ growTable rt = do
   writeIORef (rtRects rt) rects'
   writeIORef (rtCap rt) cap'
   writeURef (rtCount rt) 0
-  forM_ entries $ \(k, r) -> insertRect rt k r
+  for_ entries \(k, r) -> insertRect rt k r
 
 -- | Record a slot's rect, replacing any rect recorded under that slot
 -- earlier in the same frame.
@@ -184,6 +186,6 @@ rectTableToList :: RectTable -> IO [(Int, Rect)]
 rectTableToList rt = do
   cap <- readIORef (rtCap rt)
   keys <- readIORef (rtKeys rt)
-  fmap catMaybes . forM [0 .. cap - 1] $ \i -> do
+  fmap catMaybes . for [0 .. cap - 1] $ \i -> do
     key <- readIntAt keys i
     if key == 0 then pure Nothing else Just . (,) key <$> readRectAt rt i

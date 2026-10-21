@@ -48,13 +48,13 @@ instance a ~ b => GField name (S1 ('MetaSel ('Just name) u s l) (K1 i b)) a wher
 instance {-# OVERLAPPABLE #-}
   TypeError ('Text "The record has no field " ':<>: 'ShowType name)
   => GField name (S1 m k) a where
-  gfield = error "unreachable"
+  gfield = gfield @name
 
 instance
   TypeError ('Text "Cannot focus field " ':<>: 'ShowType name
     ':<>: 'Text " of a type with more than one constructor")
   => GField name (l :+: r) a where
-  gfield = error "unreachable"
+  gfield = gfield @name
 
 -- | Whether a product holds the field @name@.
 type family Has (name :: Symbol) (rep :: Type -> Type) :: Bool where

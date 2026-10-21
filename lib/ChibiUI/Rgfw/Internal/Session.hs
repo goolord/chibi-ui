@@ -17,21 +17,24 @@ module ChibiUI.Rgfw.Internal.Session
 
 import Control.Concurrent (rtsSupportsBoundThreads, runInBoundThread)
 import Control.Exception (bracket)
-import Control.Monad (forM_, unless, void)
+import Control.Monad (unless, void)
 import Data.Bits ((.&.), (.|.))
+import Data.ByteString qualified as BS
+import Data.ByteString.Char8 qualified as BSC
 import Data.Char (chr, isPrint, toLower)
+import Data.Foldable (for_, traverse_)
 import Data.IORef
 import Data.Maybe (listToMaybe)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BSC
-import qualified Data.Text as T
+import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Word (Word8, Word32)
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Ptr (castPtr, nullPtr, plusPtr)
 import Foreign.Storable (peekByteOff)
 import GHC.Clock (getMonotonicTime)
-import qualified System.Environment
-import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, texAtlas)
+import System.Environment qualified
+import System.FilePath ((<.>))
+
 import ChibiUI.Internal.Context
   ( Context (..)
   , Wake (..)
@@ -41,23 +44,24 @@ import ChibiUI.Internal.Context
   , setTheme
   , withClipboard
   )
+import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), quadBytes, texAtlas)
+import ChibiUI.Internal.Font (Font, atlasSize, fontAtlasPixels, fontFree, newFont)
 import ChibiUI.Internal.Frame (runFrame)
 import ChibiUI.Internal.Input
 import ChibiUI.Internal.Monad (ChibiUI)
-import ChibiUI.Internal.Font (Font, atlasSize, fontAtlasPixels, fontFree, newFont)
 import ChibiUI.Internal.Style (Theme, defaultTheme, themeWindow)
 import ChibiUI.Internal.Types (Size (..), V2 (..), v2Sub, validScale)
 import ChibiUI.Rgfw.Internal.Gl (GlRenderer, freeGlRenderer, newGlRenderer, readRetainedPixels, renderFrameGl)
-import qualified RGFW as R
+import RGFW qualified as R
 
 -- | Window settings for the RGFW runner. Sizes are in logical pixels.
 data WindowSettings = WindowSettings
-  { wsTitle :: !T.Text
+  { wsTitle :: !Text
   , wsSize :: !(Int, Int)
   , wsResizable :: !Bool
   , wsFullscreen :: !Bool
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | An 800x600 resizable window titled "chibi-ui".
 defaultWindowSettings :: WindowSettings
@@ -96,9 +100,9 @@ defaultRgfwOptions =
 -- returns.
 runChibiApp :: RgfwOptions -> model -> ChibiUI model () -> IO ()
 runChibiApp opts initial view = inBoundThread $
-  bracket create (mapM_ R.closeWindow) $ \mWin -> case mWin of
+  bracket create (traverse_ R.closeWindow) \case
     Nothing -> putStrLn "Failed to create RGFW window with an OpenGL 3.2 context."
-    Just win -> R.withEventBuffer $ \evPtr -> runWindow win evPtr
+    Just win -> R.withEventBuffer (runWindow win)
   where
     settings = optWindow opts
     -- The GL context is current only on the OS thread that created it.
@@ -108,7 +112,7 @@ runChibiApp opts initial view = inBoundThread $
             (if wsResizable settings then 0 else R.rgfw_windowNoResize)
               .|. (if wsFullscreen settings then R.rgfw_windowFullscreen else 0)
           (w, h) = wsSize settings
-      R.createWindowGL (T.unpack (wsTitle settings)) 0 0 w h flags 3 2
+      R.createWindowGL (wsTitle settings) 0 0 w h flags 3 2
     runWindow win evPtr = do
       let !refreshHz = if optRefreshHz opts > 0 then optRefreshHz opts else 30
           !timeoutMs = max 1 (floor (1000 / fromIntegral refreshHz :: Double)) :: Int
@@ -117,7 +121,7 @@ runChibiApp opts initial view = inBoundThread $
       ctx <- newContext initial
       -- The font: the context's embedded subset, or a TTF of the host's
       -- choosing in its place.
-      forM_ (optFontPath opts) $ \p -> do
+      for_ (optFontPath opts) \p -> do
         embedded <- readIORef (ctxFont ctx)
         BS.readFile p >>= newFont >>= setFont ctx
         fontFree embedded
@@ -125,7 +129,7 @@ runChibiApp opts initial view = inBoundThread $
       setTheme ctx (optTheme opts)
       setScale ctx scaleInit
       writeIORef (ctxScaleOverride ctx) (optScale opts)
-      withClipboard ctx R.readClipboardText (\t -> void (R.writeClipboardText t))
+      withClipboard ctx R.readClipboardText (void . R.writeClipboardText)
       -- Open at the chosen scale: resize from the settings' logical size,
       -- then centre the window on its monitor.
       let (lw, lh) = wsSize settings
@@ -142,18 +146,18 @@ runChibiApp opts initial view = inBoundThread $
       let syncCursor = do
             want <- readIORef (ctxCursor ctx)
             syncCursorKind cursorRef (R.showMouse win) setIcon want
-          setIcon kind = void $ case kind of
-            UiCursorPointer -> R.setMouseStandard win R.rgfw_mousePointingHand
-            UiCursorText -> R.setMouseStandard win R.rgfw_mouseIbeam
-            _ -> R.setMouseDefault win
+          setIcon = \case
+            UiCursorPointer -> void (R.setMouseStandard win R.rgfw_mousePointingHand)
+            UiCursorText -> void (R.setMouseStandard win R.rgfw_mouseIbeam)
+            UiCursorDefault -> void (R.setMouseDefault win)
+            UiCursorHidden -> pure ()
           -- Fold the queued events into the input; 'True' when the window
           -- was asked to close.
-          drainEvents closed = do
-            ev <- R.pollEvent win evPtr
-            case ev of
+          drainEvents closed =
+            R.pollEvent win evPtr >>= \case
               R.EventNone -> pure closed
               R.EventWindowClose -> drainEvents True
-              _ -> modifyIORef' pendingRef (`stepEvent` ev) >> drainEvents closed
+              ev -> modifyIORef' pendingRef (`stepEvent` ev) >> drainEvents closed
           -- Settle the scale and the window's size and focus into the input,
           -- then run, render and present a frame.
           frame renderer = do
@@ -174,7 +178,7 @@ runChibiApp opts initial view = inBoundThread $
             -- just ran onto the next one.
             now <- getMonotonicTime
             prev <- readIORef lastFrameRef
-            modifyIORef' pendingRef $ \p ->
+            modifyIORef' pendingRef \p ->
               p {pendInput = (clearEphemeral (pendInput p)) {inputDeltaTime = realToFrac (now - prev)}}
             writeIORef lastFrameRef now
             syncCursor
@@ -186,17 +190,16 @@ runChibiApp opts initial view = inBoundThread $
                   WakeSoon -> timeoutMs
                   WakeAt t -> max 1 (ceiling ((t - now) * 1000))
                   WakeIdle -> -1
-            unless quit $ do
+            unless quit do
               R.waitForEvent wait
               closed <- drainEvents False
               frame renderer
               unless closed (loop renderer)
-      bracket newGlRenderer freeGlRenderer $ \renderer -> do
+      bracket newGlRenderer freeGlRenderer \renderer -> do
         -- Present the opening frame before blocking on events.
         frame renderer
         -- Debug dump of the frame and the font atlas, then quit.
-        dumpPath <- System.Environment.lookupEnv "CHIBI_UI_DUMP"
-        case dumpPath of
+        System.Environment.lookupEnv "CHIBI_UI_DUMP" >>= \case
           Just path -> do
             (pw, ph) <- R.windowSize win
             -- Re-run the frame for its draw list: the arena was reused.
@@ -220,6 +223,7 @@ dumpFrame renderer font dd path w h = do
       header =
         BSC.pack ("P6\n" ++ show w ++ " " ++ show h ++ "\n255\n")
       (aw, ah) = atlasSize
+      ppmPath = path <.> "ppm"
   ptr <- fontAtlasPixels font
   (nz, maxX, maxY) <-
     if ptr == nullPtr
@@ -227,17 +231,17 @@ dumpFrame renderer font dd path w h = do
       else do
         bytes <- BS.packCStringLen (castPtr ptr, aw * ah)
         let ink = BS.elemIndices 0xff bytes
-            maxX = maximum (0 : [i `mod` aw | i <- ink])
-            maxY = maximum (0 : [i `div` aw | i <- ink])
+            maxX = foldl' max 0 [i `mod` aw | i <- ink]
+            maxY = foldl' max 0 [i `div` aw | i <- ink]
         pure (BS.length (BS.filter (/= 0) bytes), maxX, maxY)
   -- P6 stores RGB, while the retained framebuffer is RGBA.
   let rgb = BS.pack [b | (i, b) <- zip [0 :: Int ..] (BS.unpack flipped), i `mod` 4 /= 3]
-  BS.writeFile (path ++ ".ppm") (header <> rgb)
+  BS.writeFile ppmPath (header <> rgb)
   let atlasCmds = [c | c <- drawCommands dd, cmdTextureId c == texAtlas]
   -- The first glyph quad's position and UV, against the atlas ink.
   uvDump <- case listToMaybe atlasCmds of
     Nothing -> pure ("no atlas cmd" :: String)
-    Just c -> withForeignPtr (drawVertices dd) $ \vp -> do
+    Just c -> withForeignPtr (drawVertices dd) \vp -> do
       let p = castPtr vp `plusPtr` (fromIntegral (cmdFirstQuad c) * quadBytes)
       x <- peekByteOff p 0 :: IO Float
       y <- peekByteOff p 4 :: IO Float
@@ -245,7 +249,7 @@ dumpFrame renderer font dd path w h = do
       v <- peekByteOff p 28 :: IO Float
       pure ("first glyph vertex x=" ++ show x ++ " y=" ++ show y ++ " u=" ++ show u ++ " v=" ++ show v)
   putStrLn
-    ( "dump: " ++ path ++ ".ppm " ++ show (w, h)
+    ( "dump: " ++ ppmPath ++ " " ++ show (w, h)
         ++ " atlas " ++ show (aw, ah)
         ++ " nonzero=" ++ show nz
         ++ " inkMax(x,y)=" ++ show (maxX, maxY)
@@ -333,7 +337,7 @@ applyEvent inp = \case
   R.EventMouseButton btn down -> applyMouseButton (mouseButtonNumber (fromIntegral btn + 1)) down inp
   -- RGFW's wheel is positive up and left; the input's is down and right.
   R.EventMouseScroll dx dy -> inp {inputScroll = inputScroll inp `v2Sub` V2 dx dy}
-  R.EventKeyChar ch | isPrint ch -> inp {inputChars = inputChars inp ++ [ch]}
+  R.EventKeyChar ch | isPrint ch -> inp {inputChars = T.snoc (inputChars inp) ch}
   R.EventKeyPress k m -> key k m True
   R.EventKeyRelease k m -> key k m False
   R.EventOther t | t == R.rgfw_windowFocusOut -> releaseAllKeys inp

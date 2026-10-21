@@ -196,12 +196,13 @@ module ChibiUI
 
 import Control.Monad (unless, when)
 import Data.Text (Text)
+import Data.Text qualified as Text
 import Lens.Micro (Lens', lens)
-import qualified Data.Text as Text
+
 import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input (Key (..), Modifiers (..), MouseButton (..), noModifiers)
 import ChibiUI.Internal.Menu (contextMenu, debugOverlay, tooltip)
 import ChibiUI.Internal.Monad
-import ChibiUI.Internal.Style (Theme (..), TextAlign (..), defaultTheme, lightTheme)
+import ChibiUI.Internal.Style (TextAlign (..), Theme (..), defaultTheme, lightTheme)
 import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))
 import ChibiUI.Internal.Widgets

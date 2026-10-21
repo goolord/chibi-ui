@@ -20,20 +20,23 @@ module ChibiUI.Internal.Damage
   ) where
 
 import Data.IORef (IORef, readIORef, writeIORef)
+import Data.List.NonEmpty (NonEmpty (..), nonEmpty)
+import Data.List.NonEmpty qualified as NE
 import Data.Word (Word8)
 import Foreign.C.Types (CInt (..), CSize (..))
 import Foreign.ForeignPtr (ForeignPtr, withForeignPtr)
 import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, plusPtr)
 import Foreign.Storable (peekByteOff)
+
 import ChibiUI.Internal.Draw (DrawCmd (..), DrawData (..), newBuffer, quadBytes, vertexSize)
 import ChibiUI.Internal.Types
   ( Rect (..)
   , Size (..)
   , rectArea
   , rectNonEmpty
-  , rectsOverlap
   , rectUnion
+  , rectsOverlap
   )
 
 foreign import ccall unsafe "string.h memcmp"
@@ -50,7 +53,7 @@ data Damage
   | DamageFull
   -- ^ Repaint everything: the frames differ structurally, or too much of
     -- the window changed to track.
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | What a renderer holding the tracked frame's vertices must upload of
 -- the next one.
@@ -60,7 +63,7 @@ data Upload
   | UploadQuads [Int]
   -- ^ Just these quads, in ascending order; the quad count held.
   | UploadAll
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | One frame's copied geometry, for diffing against the next frame. The
 -- arena is reset and reused every frame, so a snapshot owns its bytes.
@@ -152,15 +155,14 @@ trackFrame ref window dd = fst <$> trackUploads ref window dd
 -- vertices must upload of this one. A damage-free frame keeps the stored
 -- bytes and uploads nothing: they still draw the current frame exactly.
 trackUploads :: IORef (Maybe FrameSnapshot) -> Size -> DrawData -> IO (Damage, Upload)
-trackUploads ref window dd = do
-  prev <- readIORef ref
-  case prev of
+trackUploads ref window dd =
+  readIORef ref >>= \case
     Nothing -> (DamageFull, UploadAll) <$ (writeIORef ref . Just =<< copyInto Nothing dd)
     Just snap -> do
       diff@(damage, _) <- diffFrame snap dd window
       if damage == DamageNone
         then pure (DamageNone, UploadNone)
-        else diff <$ (writeIORef ref . Just =<< copyInto prev dd)
+        else diff <$ (writeIORef ref . Just =<< copyInto (Just snap) dd)
 
 -- | The quads that differ between the old vertices and the new over the
 -- quads both have, with the bounds of every quad touched: those, plus the
@@ -169,14 +171,13 @@ trackUploads ref window dd = do
 changedQuads :: Ptr Word8 -> Ptr Word8 -> Int -> Int -> IO (Maybe ([Int], [Rect]))
 changedQuads old new oldN newN = do
   let n = min oldN newN
-  diff <- diffQuads old new n (maxChangedQuads - (oldN - n) - (newN - n))
-  case diff of
+  diffQuads old new n (maxChangedQuads - (oldN - n) - (newN - n)) >>= \case
     Nothing -> pure Nothing
     Just changed -> do
       -- Both sides of every changed quad: the old area may need
       -- clearing even where the new frame draws nothing.
-      oldSide <- mapM (quadAtPtr old) (changed ++ [n .. oldN - 1])
-      newSide <- mapM (quadAtPtr new) (changed ++ [n .. newN - 1])
+      oldSide <- traverse (quadAtPtr old) (changed ++ [n .. oldN - 1])
+      newSide <- traverse (quadAtPtr new) (changed ++ [n .. newN - 1])
       pure (Just (changed, oldSide ++ newSide))
 
 -- | Indices of the quads over @[0, n)@ whose bytes differ, or 'Nothing'
@@ -206,14 +207,14 @@ quadAtPtr p !k = do
 -- | Merge overlapping rectangles, collapse runs of many into their union,
 -- and give up on a full frame when the union covers most of the window.
 mergeDamage :: Size -> [Rect] -> Damage
-mergeDamage window rs0
-  | null merged = DamageNone
-  | rectArea union / max 1 (sizeW window * sizeH window) >= damageFullFrac = DamageFull
-  | length merged > maxDamageRects = DamageRects [union]
-  | otherwise = DamageRects merged
-  where
-    merged = mergeRects (filter rectNonEmpty rs0)
-    union = foldr1 rectUnion merged
+mergeDamage (Size winW winH) rs0 = case nonEmpty (mergeRects (filter rectNonEmpty rs0)) of
+  Nothing -> DamageNone
+  Just merged@(r0 :| rs)
+    | rectArea union / max 1 (winW * winH) >= damageFullFrac -> DamageFull
+    | length rs >= maxDamageRects -> DamageRects [union]
+    | otherwise -> DamageRects (NE.toList merged)
+    where
+      union = foldl' rectUnion r0 rs
 
 -- | One merging pass: each rectangle absorbs every later one it overlaps,
 -- growing as it does, before the pass moves on. A kept rectangle can

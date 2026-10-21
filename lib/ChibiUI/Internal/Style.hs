@@ -11,11 +11,11 @@ module ChibiUI.Internal.Style
   , alignedTextY
   ) where
 
-import ChibiUI.Internal.Types (Color, Rect (..), colorRGBA)
 import ChibiUI.Internal.Font (lineHeight)
+import ChibiUI.Internal.Types (Color, Rect (..), colorRGBA)
 
 data TextAlign = AlignTop | AlignMiddle | AlignBottom
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 alignedTextY :: TextAlign -> Rect -> Float
 alignedTextY align r = rectY r + max 0 (rectH r - lineHeight) * case align of
@@ -45,7 +45,7 @@ data Theme = Theme
   , themeTextAlign :: !TextAlign
   -- ^ Where a line of text sits in a box taller than it.
   }
-  deriving (Eq, Show)
+  deriving stock (Eq, Show)
 
 -- | A dark theme.
 defaultTheme :: Theme

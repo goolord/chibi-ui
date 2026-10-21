@@ -30,6 +30,8 @@ source-repository head
 common extensions
     default-language: GHC2024
     default-extensions:
+        BlockArguments
+        MultiWayIf
         OverloadedStrings
 
 common warnings
@@ -93,6 +95,7 @@ library
         bytestring ^>=0.12,
         containers >=0.7 && <0.9,
         file-embed ^>=0.0.16,
+        filepath ^>=1.5,
         microlens ^>=0.5,
         mtl ^>=2.3,
         text ^>=2.1
