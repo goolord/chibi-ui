@@ -72,7 +72,7 @@ tour = do
     when auto (setUiScale 0)
 
   -- Buttons and state. Inside a row, children flow left to right.
-  _ <- row $ do
+  _ <- rowWith AlignCenter $ do
     isLocked <- use #locked
     disabled isLocked $ do
       minus <- button "-"

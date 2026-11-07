@@ -23,7 +23,8 @@ module ChibiUI.Internal.Layout
 
 import Data.Maybe (fromMaybe)
 
-import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectUnion)
+import ChibiUI.Internal.Style (Align, TextAlign (..))
+import ChibiUI.Internal.Types (Rect (..), Size (..), V2 (..), rectUnion, roundHalfUp)
 
 -- | How the next widget joins the current line.
 data LineMode
@@ -32,9 +33,9 @@ data LineMode
   | JoinOnce
   -- ^ Beside the last widget, once: 'sameLine' opened the line, and the
   -- next widget placed closes it again.
-  | Flowing
+  | Flowing !Align !Float
   -- ^ Beside the last widget, always: a @row@'s children flow rightward,
-  -- so 'sameLine' there changes nothing.
+  -- aligned vertically according to 'Align' within a row of the given target height.
   deriving stock (Eq, Show)
 
 -- | Where the cursor is and what the next widget inherits.
@@ -98,12 +99,18 @@ data LayoutCommand = SameLine | Newline | NextWidth !Float | NextHeight !Float |
 stepLayout :: Float -> LayoutCommand -> LayoutState -> LayoutState
 stepLayout gap command ls = case command of
   SameLine -> ls
-    { lsMode = if lsMode ls == Flowing then Flowing else JoinOnce
+    { lsMode = case lsMode ls of
+        Flowing {} -> lsMode ls
+        _ -> JoinOnce
     , lsPenX = rectX r + rectW r + gap
-    , lsLineY = rectY r
+    , lsLineY = case lsMode ls of
+        Flowing {} -> lsLineY ls
+        _ -> rectY r
     }
   Newline -> ls
-    { lsMode = if lsMode ls == Flowing then Flowing else Stacked
+    { lsMode = case lsMode ls of
+        Flowing {} -> lsMode ls
+        _ -> Stacked
     , lsPenX = lsIndent ls
     , lsLineY = if lineOpen ls then lsLineY ls + lsLineH ls + gap else lsLineY ls
     , lsLineH = 0
@@ -122,11 +129,11 @@ placeLayout gap sz ls =
   ( r
   , ls
       { lsPenX = case lsMode ls of
-          Flowing -> rectX r + w + gap
+          Flowing {} -> rectX r + w + gap
           JoinOnce -> lsIndent ls
           Stacked -> lsPenX ls
-      , lsLineY = if flowing then rectY r else rectY r + lineH + gap
-      , lsMode = if flowing then Flowing else Stacked
+      , lsLineY = if flowing then lsLineY ls else rectY r + lineH + gap
+      , lsMode = if flowing then lsMode ls else Stacked
       , lsLineH = lineH
       , lsLast = r
       , lsNextW = Nothing
@@ -137,9 +144,17 @@ placeLayout gap sz ls =
   where
     w = max 0 (fromMaybe (sizeW sz) (lsNextW ls))
     h = max 0 (fromMaybe (sizeH sz) (lsNextH ls))
-    r = Rect (lsPenX ls) (lsLineY ls) w h
+    offsetY = case lsMode ls of
+      Flowing align targetH -> case align of
+        AlignTop -> 0
+        AlignMiddle -> fromIntegral (roundHalfUp (max 0 (targetH - h) * 0.5))
+        AlignBottom -> max 0 (targetH - h)
+      _ -> 0
+    r = Rect (lsPenX ls) (lsLineY ls + offsetY) w h
     lineH = if lineOpen ls then max (lsLineH ls) h else h
-    flowing = lsMode ls == Flowing
+    flowing = case lsMode ls of
+      Flowing {} -> True
+      _ -> False
 
 remainingWidth :: LayoutState -> Float
 remainingWidth ls = max 0 (lsIndent ls + lsAvailW ls - lsPenX ls)
@@ -155,14 +170,23 @@ remainingHeight ls = max 0 (lsBottom ls - lsLineY ls)
 -- | A group measures its children independently, then occupies one parent item.
 beginGroup :: LineMode -> LayoutState -> LayoutState
 beginGroup mode ls =
-  scopeAt mode (lsPenX ls) (lsLineY ls)
-    (nextOrRemainingWidth ls)
-    (maybe (lsBottom ls) (lsLineY ls +) (lsNextH ls))
+  let m = case (mode, lsNextH ls) of
+        (Flowing align _, Just h) -> Flowing align h
+        _ -> mode
+   in scopeAt m (lsPenX ls) (lsLineY ls)
+        (nextOrRemainingWidth ls)
+        (maybe (lsBottom ls) (lsLineY ls +) (lsNextH ls))
 
 -- | Leave a group: its size, from where it began in the parent, and the
 -- parent's cursor back, for the group to be placed as one item.
 endGroup :: LayoutState -> LayoutState -> (Size, LayoutState)
-endGroup parent child = (contentSize (V2 (lsPenX parent) (lsLineY parent)) child, parent)
+endGroup parent child =
+  let sz = contentSize (V2 (lsPenX parent) (lsLineY parent)) child
+      rowH = case lsMode child of
+        Flowing AlignTop _ -> sizeH sz
+        Flowing _ targetH -> max (sizeH sz) targetH
+        _ -> sizeH sz
+   in (sz {sizeH = rowH}, parent)
 
 -- | Extent from a scope's origin, excluding trailing cursor spacing.
 contentSize :: V2 -> LayoutState -> Size

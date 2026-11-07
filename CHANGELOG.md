@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added `rowWith align`: lay out children horizontally with vertical alignment
+  (`AlignTop`, `AlignCenter` / `AlignMiddle`, `AlignBottom`). With `AlignCenter`,
+  children of different heights (e.g. labels and buttons) center vertically
+  against one another automatically. `row` is `rowWith AlignTop`.
+
 - Retuned `defaultTheme` and `lightTheme`: cooler neutrals, softer borders,
   brighter text and a calmer accent, with an 8px gap between widgets (was 6).
 

@@ -38,6 +38,7 @@ module ChibiUI.Internal.Monad
   , sameLine
   , newline
   , row
+  , rowWith
   , column
   , indent
   , nextWidth
@@ -108,6 +109,7 @@ import Control.Monad.State.Class (MonadState (..), gets, modify, modify')
 import Data.ByteString qualified as BS
 import Data.IORef
 import Data.IntMap.Strict qualified as IM
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Word (Word64)
 import Lens.Micro (Lens', set, (^.))
@@ -127,7 +129,7 @@ import ChibiUI.Internal.Layout (LayoutState)
 import ChibiUI.Internal.Layout qualified as Layout
 import ChibiUI.Internal.RectTable (insertRect, lookupRect)
 import ChibiUI.Internal.Store
-import ChibiUI.Internal.Style (TextAlign, Theme (..), alignedTextY, fieldHeight, widgetPad)
+import ChibiUI.Internal.Style (Align, TextAlign (..), Theme (..), alignedTextY, fieldHeight, widgetPad)
 import ChibiUI.Internal.Types
 
 -- | A view, or one widget's body, with access to an application model.
@@ -307,11 +309,28 @@ sameLine = layoutCommand Layout.SameLine
 newline :: ChibiUI model ()
 newline = layoutCommand Layout.Newline
 
+-- | Lay out a horizontal group with a chosen vertical alignment.
+-- 'row' is 'rowWith AlignTop'. With 'AlignCenter', children of different
+-- heights (such as labels and buttons) center vertically against one another.
+rowWith :: Align -> ChibiUI model a -> ChibiUI model a
+rowWith AlignTop body = group (Layout.Flowing AlignTop 0) body
+rowWith align body = do
+  wid <- nextId
+  savedH <- widgetState rowHeights wid
+  let defaultH = max fieldHeight (lineHeight + widgetPad * 2)
+      targetH = fromMaybe defaultH savedH
+  (a, size) <- layoutScope (Layout.beginGroup (Layout.Flowing align targetH)) Layout.endGroup body
+  let actualH = sizeH size
+  when (actualH > 0 && Just actualH /= savedH) $ do
+    setWidgetState rowHeights wid (Just actualH)
+    when (actualH /= targetH) requestFrame
+  a <$ place size
+
 -- | Lay out a horizontal group: its children flow left to right, and the
 -- group occupies one item in its parent. Preferred over repeated 'sameLine'
 -- for any run of two or more widgets.
 row :: ChibiUI model a -> ChibiUI model a
-row = group Layout.Flowing
+row = rowWith AlignTop
 
 -- | Lay out a vertical group, reserving its full bounds in the parent.
 column :: ChibiUI model a -> ChibiUI model a

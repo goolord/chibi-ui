@@ -12,6 +12,7 @@ module ChibiUI.Internal.Store
   , dragGrabs
   , scrollRegions
   , textFields
+  , rowHeights
   , lookupState
   , writeState
   -- * State
@@ -38,11 +39,12 @@ data WidgetStore = WidgetStore
   , storeDrag :: !(IntMap (Float, Float))
   , storeScroll :: !(IntMap ScrollState)
   , storeTextField :: !(IntMap FieldState)
+  , storeRowHeight :: !(IntMap Float)
   }
 
 -- | No widget has state.
 emptyWidgetStore :: WidgetStore
-emptyWidgetStore = WidgetStore IM.empty IM.empty IM.empty IM.empty IM.empty IM.empty IM.empty
+emptyWidgetStore = WidgetStore IM.empty IM.empty IM.empty IM.empty IM.empty IM.empty IM.empty IM.empty
 
 -- | One of the store's maps: how to read it, and how to put a new one back.
 -- The accessors inline at the map they are given, so a write compiles to
@@ -76,6 +78,10 @@ scrollRegions = StoreMap storeScroll (\m st -> st {storeScroll = m})
 -- | Each text field's draft, scroll and pointer state.
 textFields :: StoreMap FieldState
 textFields = StoreMap storeTextField (\m st -> st {storeTextField = m})
+
+-- | Each aligned row's measured height from the last frame.
+rowHeights :: StoreMap Float
+rowHeights = StoreMap storeRowHeight (\m st -> st {storeRowHeight = m})
 
 -- | A widget's entry in one map.
 {-# INLINE lookupState #-}

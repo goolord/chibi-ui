@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- | The theme: the colours and spacing widgets draw with. Flat surfaces,
 -- 1px borders and square corners, so geometry matches hit boxes.
 module ChibiUI.Internal.Style
@@ -7,15 +9,24 @@ module ChibiUI.Internal.Style
   , widgetPad
   , fieldPad
   , fieldHeight
-  , TextAlign (..)
+  , TextAlign (.., AlignCenter)
+  , Align
   , alignedTextY
   ) where
 
 import ChibiUI.Internal.Font (lineHeight)
 import ChibiUI.Internal.Types (Color, Rect (..), colorRGBA)
 
+-- | Vertical alignment for text and layout runs.
 data TextAlign = AlignTop | AlignMiddle | AlignBottom
   deriving stock (Eq, Show)
+
+-- | Synonym for 'TextAlign', specifying vertical alignment in 'rowWith'.
+type Align = TextAlign
+
+-- | Synonym for 'AlignMiddle', commonly used for vertical centering in rows.
+pattern AlignCenter :: Align
+pattern AlignCenter = AlignMiddle
 
 alignedTextY :: TextAlign -> Rect -> Float
 alignedTextY align r = rectY r + max 0 (rectH r - lineHeight) * case align of

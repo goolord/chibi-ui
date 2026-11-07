@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 -- |
 -- Module      : ChibiUI
 -- Description : A tiny immediate-mode GUI on RGFW
@@ -106,6 +108,7 @@ module ChibiUI
   , sameLine
   , newline
   , row
+  , rowWith
   , column
   , indent
   , nextWidth
@@ -119,6 +122,7 @@ module ChibiUI
   , alignTextToFrame
   , withTextAlign
   , TextAlign (..)
+  , Align
 
     -- * Input queries
 
@@ -203,6 +207,6 @@ import ChibiUI.Internal.Id (WidgetId)
 import ChibiUI.Internal.Input (Key (..), Modifiers (..), MouseButton (..), noModifiers)
 import ChibiUI.Internal.Menu (contextMenu, debugOverlay, tooltip)
 import ChibiUI.Internal.Monad
-import ChibiUI.Internal.Style (TextAlign (..), Theme (..), defaultTheme, lightTheme)
+import ChibiUI.Internal.Style (Align, TextAlign (..), Theme (..), defaultTheme, lightTheme)
 import ChibiUI.Internal.Types (Color, Rect (..), Size (..), V2 (..))
 import ChibiUI.Internal.Widgets

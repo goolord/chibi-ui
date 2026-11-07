@@ -81,6 +81,7 @@ main = do
   testNestedTree
   testKeyedTree
   testClippedTree
+  testRowWith
   putStrLn "chibi-ui-test: all tests passed"
 
 -- | A context for headless frames.
@@ -1657,3 +1658,40 @@ testClippedTree = do
     [r] -> assert "tree: narrow header painting escaped bounds"
       (rectW r == 8 && not (null points) && all (inside r) points)
     _ -> fail "tree: unexpected narrow header geometry"
+
+testRowWith :: IO ()
+testRowWith = do
+  ctx <- newTestContext
+  -- Default row (AlignTop): label (h=16) and button (h=28) both start at topY = 10
+  _ <- frame ctx id $ row $ do
+    _ <- label "text"
+    button "+"
+  [rLabel0, rBtn0] <- readRects ctx
+  assert ("rowWith: AlignTop misaligned: " ++ show (rLabel0, rBtn0))
+    (rectY rLabel0 == 10 && rectY rBtn0 == 10 && rectH rLabel0 == 16 && rectH rBtn0 == 28)
+
+  -- AlignCenter: label (h=16) centers in button's height (28): offset = (28-16)/2 = 6 -> y = 16
+  _ <- frame ctx id $ rowWith AlignCenter $ do
+    _ <- label "text"
+    button "+"
+  [rLabel1, rBtn1] <- readRects ctx
+  assert ("rowWith: AlignCenter misaligned: " ++ show (rLabel1, rBtn1))
+    (rectY rBtn1 == 10 && rectY rLabel1 == 16 && rectH rLabel1 == 16 && rectH rBtn1 == 28)
+
+  -- AlignBottom: label (h=16) aligns to bottom of button (28): offset = 28-16 = 12 -> y = 22
+  _ <- frame ctx id $ rowWith AlignBottom $ do
+    _ <- label "text"
+    button "+"
+  [rLabel2, rBtn2] <- readRects ctx
+  assert ("rowWith: AlignBottom misaligned: " ++ show (rLabel2, rBtn2))
+    (rectY rBtn2 == 10 && rectY rLabel2 == 22 && rectH rLabel2 == 16 && rectH rBtn2 == 28)
+
+  -- Explicit nextHeight: nextHeight 40 >> rowWith AlignCenter
+  -- label: (40 - 16)/2 = 12 -> y = 22
+  -- button: (40 - 28)/2 = 6 -> y = 16
+  _ <- frame ctx id $ nextHeight 40 >> (rowWith AlignCenter $ do
+    _ <- label "text"
+    button "+")
+  [rLabel3, rBtn3] <- readRects ctx
+  assert ("rowWith: explicit height AlignCenter misaligned: " ++ show (rLabel3, rBtn3))
+    (rectY rLabel3 == 22 && rectY rBtn3 == 16 && rectH rLabel3 == 16 && rectH rBtn3 == 28)
